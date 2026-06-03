@@ -23,6 +23,31 @@ class RuntimeDecisionController:
         self._default_interval = int(runtime.get("default_inference_interval", 1))
         self._default_threads = int(runtime.get("default_cpu_threads", 4))
 
+    def classify_runtime_state(
+        self,
+        scene_state: dict[str, Any],
+        device_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Step 4 — fuse scene workload and SoC thermal into a runtime state (backbone).
+
+        Maps to the figure's **Scene Complexity** + **SoC Temp Sensor** inputs before
+        the **Layer Router & Schedule**. Feature policy uses this dict in ``decide()``.
+        """
+        policy = self._config.get("policy", {})
+        workload = scene_state.get("workload", "medium")
+        if not policy.get("use_scene", True):
+            workload = "medium"
+        thermal = device_state.get("thermal_state", "unknown")
+        if not policy.get("use_thermal", True):
+            thermal = "normal"
+        return {
+            "workload": workload,
+            "thermal_state": thermal,
+            "temp_c": device_state.get("temp_c"),
+            # TODO(Member 3): layer_schedule_hint, query_budget_hint from scene × thermal
+        }
+
     def decide(
         self,
         scene_state: dict[str, Any],
@@ -30,7 +55,7 @@ class RuntimeDecisionController:
         recent_metrics: dict[str, Any] | None = None,
     ) -> RuntimeAction:
         """
-        Produce runtime action from scene, device, and optional recent metrics.
+        Step 5 — select ``RuntimeAction`` (Layer Router & Schedule + query/layer knobs).
 
         Parameters
         ----------
@@ -47,16 +72,11 @@ class RuntimeDecisionController:
         if fixed is not None:
             return fixed
 
-        policy = self._config.get("policy", {})
-        use_scene = policy.get("use_scene", True)
-        use_thermal = policy.get("use_thermal", True)
-
-        workload = scene_state.get("workload", "medium") if use_scene else "medium"
-        thermal = device_state.get("thermal_state", "unknown")
-        if not use_thermal:
-            thermal = "normal"
-
-        return self._rule_based_action(workload, thermal)
+        runtime_state = self.classify_runtime_state(scene_state, device_state)
+        return self._rule_based_action(
+            runtime_state["workload"],
+            runtime_state["thermal_state"],
+        )
 
     def _rule_based_action(self, workload: str, thermal: str) -> RuntimeAction:
         """

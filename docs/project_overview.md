@@ -6,50 +6,62 @@
 
 ## Motivation
 
-Edge devices such as the Raspberry Pi must run object detection under varying scene complexity and thermal constraints. A fixed inference configuration wastes power on simple scenes or degrades accuracy on busy scenes. This project implements a **scene-aware and thermal-aware embedded runtime manager** that dynamically adjusts inference and system resources while using RT-DETR as the representative detection workload.
+Edge devices such as the Raspberry Pi must run object detection under varying scene complexity and thermal constraints. This project implements a **scene-aware and thermal-aware embedded runtime manager** around RT-DETR: the runtime observes the scene and SoC temperature, then adjusts decoder depth, query budget, frame schedule, and edge resources.
 
-The main contribution is **not** a new detector architecture, but an **adaptive runtime** that co-adapts to:
+The main contribution is **not** a new full detector backbone, but the **co-adaptation control plane** (Layer Router & Schedule + query selection) on the Pi.
 
-1. **Scene workload** — estimated from low-cost visual and detection-history signals.
-2. **Device state** — CPU temperature, frequency, throttling, latency, and FPS.
+## Per-frame workflow
 
-## Architecture
+See [README.md](../README.md) for the full table. Summary:
+
+1. Capture frame  
+2. Scene workload features  
+3. Device / SoC state  
+4. Classify runtime state  
+5. Select `RuntimeAction`  
+6. RT-DETR infer or skip  
+7. Log and update for next frame  
+
+Implemented in `src/scene_runtime/runtime/loop.py`.
+
+## Architecture (control plane)
 
 ```
 Camera / Video
     ↓
-Scene Workload Estimator
+Scene Workload Estimator     ← figure: Scene Complexity
     ↓
-Device State Monitor
+Device State Monitor         ← figure: SoC Temp Sensor (+ feedback)
     ↓
-Runtime Decision Controller
+Classify runtime state
     ↓
-Runtime Action
+Runtime Decision Controller  ← figure: Layer Router & Schedule
     ↓
-RT-DETR Inference Engine
+RuntimeAction                ← decoder_layers, query_budget, interval, …
     ↓
-Logs + Metrics
+RT-DETR Inference Engine     ← figure: Dynamic Decoder + Top-K queries (in ONNX)
+    ↓
+Logs + Metrics               ← feeds next-frame decisions
 ```
 
 ## Modules
 
 | Module | Responsibility |
 |--------|----------------|
-| Scene Workload Estimator | Classify scene as light / medium / heavy |
-| Device State Monitor | Read Pi thermal and CPU state |
-| Runtime Decision Controller | Map state → runtime configuration |
-| RT-DETR Inference Engine | ONNX Runtime detection |
-| Runtime Loop | Orchestrate pipeline and logging |
+| Scene Workload Estimator | Lightweight features; workload light/medium/heavy |
+| Device State Monitor | SoC temp, frequency, throttling |
+| Runtime Decision Controller | Runtime state + Layer Router / schedule |
+| RT-DETR Inference Engine | ONNX inference under selected action |
+| Runtime Loop | 7-step orchestration |
+
+## Status
+
+**Backbone:** workflow wired; adaptive policies and in-model dynamic decoder/query are **TODO** (README 4-member split).
 
 ## Upstream Dependency
 
-RT-DETR is referenced via `third_party/RT-DETR` (git clone) or exported ONNX models. See [third_party/README.md](../third_party/README.md).
+RT-DETR: `third_party/RT-DETR` — see [third_party/README.md](../third_party/README.md).
 
 ## Experiment Strategies
 
-Seven compared strategies are defined under `configs/strategies/`:
-
-- `default`, `static_affinity`, `fixed_low_power`, `fixed_frame_skip`
-- `thermal_only`, `scene_only`, `scene_thermal_coadaptive`
-
-See [experiment_protocol.md](experiment_protocol.md) for run procedures.
+Seven strategies under `configs/strategies/`. See [experiment_protocol.md](experiment_protocol.md).

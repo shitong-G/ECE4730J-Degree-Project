@@ -13,21 +13,44 @@ Upstream detector: [RT-DETR](https://github.com/lyuwenyu/RT-DETR) (cloned to `th
 
 ## Architecture
 
+### Per-frame runtime workflow (backbone — `RuntimeLoop`)
+
+Each frame follows this order (implemented in `src/scene_runtime/runtime/loop.py`):
+
+| Step | Action | Code module |
+|------|--------|-------------|
+| 1 | Capture current frame | `FrameSource` / camera / video |
+| 2 | Extract lightweight scene workload features | `SceneWorkloadEstimator` |
+| 3 | Read Raspberry Pi device state (SoC temp, freq, …) | `DeviceStateMonitor` |
+| 4 | Classify runtime state (scene × thermal) | `RuntimeDecisionController.classify_runtime_state()` |
+| 5 | Select runtime action (schedule + query/layer budget) | `RuntimeDecisionController.decide()` → `RuntimeAction` |
+| 6 | Run RT-DETR inference **or** skip/reuse per `inference_interval` | `ONNXRTDETREngine` |
+| 7 | Log performance; update history for next decision | `RuntimeLogger`, `DetectionHistory`, `MetricsTracker` |
+
 ```
-Camera / Video
-    ↓
-Scene Workload Estimator
-    ↓
-Device State Monitor
-    ↓
-Runtime Decision Controller
-    ↓
-Runtime Action
-    ↓
-RT-DETR Inference Engine
-    ↓
-Logs + Metrics
+Frame in
+  → [2] Scene features / workload
+  → [3] SoC state (temp feedback re-read each frame)
+  → [4] Runtime state
+  → [5] RuntimeAction
+  → [6] RT-DETR (ONNX) or skip
+  → [7] CSV log + metrics
 ```
+
+### Mapping to the thesis figure (RT-DETR + Co-Adaptation)
+
+The diagram’s **in-model** blocks (Backbone, Encoder, Decoder) live inside RT-DETR/ONNX. This repo implements the **edge runtime manager** that drives them:
+
+| Figure block | Repo backbone (now) | Feature TODO |
+|--------------|---------------------|--------------|
+| Scene Complexity (MLP) | Lightweight OpenCV/NumPy features + `classify_workload()` stub | Calibrated scene MLP/rules (Member 1) |
+| SoC Temp Sensor + feedback | `DeviceStateMonitor` sysfs / `vcgencmd` | Pi validation, apply governor/affinity (Member 2) |
+| Layer Router & Schedule | `RuntimeAction.decoder_layers`, `inference_interval`, … | Scene×thermal layer schedule (Member 3) |
+| Uncertainty-Minimal Query (Top-K) | `RuntimeAction.query_budget` (logged, not applied) | Top-K / query budget in ONNX (Member 4) |
+| Dynamic Decoder (skip L4–6 if simple) | `decoder_layers` field in action + logs | Early-exit / partial decoder export (Member 4) |
+| Raspberry Pi edge deploy | `RuntimeLoop` + configs | Full Pi experiments (Member 4) |
+
+SoC temperature measured at Step 3 feeds Step 4 on the **next** frame (closed-loop thermal feedback), matching the dashed feedback arrow in the figure.
 
 ## Project status
 
@@ -54,8 +77,8 @@ Real functionality for the thesis — **not implemented** in the backbone (see c
 |--------|--------|------------------------|
 | **1 — Scene** | `feature/scene-estimator` | Calibrated `classify_workload()` (light/medium/heavy); threshold tuning on labeled videos; optional learned classifier; scene-only strategy validation |
 | **2 — Device** | `feature/device-monitor` | Pi4/Pi5 validation of temp/freq/throttling; apply **governor** & **CPU affinity** from `RuntimeAction`; per-board thermal YAML; optional power (INA219) |
-| **3 — Controller** | `feature/controller` | Co-adaptive rules in `runtime_controller.py` (scene × thermal); wire actions into loop; tune all 7 strategies; latency-aware rules via `recent_metrics` |
-| **4 — Inference & experiments** | `feature/inference-engine`, `experiment/pi4-baseline` | RT-DETR clone + ONNX export; real `postprocess.py`; ONNX thread/options from action; Pi real-video runs; 15/30/60 min campaigns; analysis plots & report tables |
+| **3 — Controller** | `feature/controller` | **Layer Router & Schedule**: scene×thermal → `decoder_layers`, `query_budget`, interval, resolution; implement `classify_runtime_state` hints; tune all 7 strategies |
+| **4 — Inference & experiments** | `feature/inference-engine`, `experiment/pi4-baseline` | RT-DETR ONNX + **Dynamic Decoder** / **Top-K query** from `RuntimeAction`; real `postprocess.py`; Pi runs & evaluation |
 
 **Suggested order:** Member 4 (ONNX) → Members 1 & 2 (parallel) → Member 3 (policies) → Member 4 (full evaluation).
 

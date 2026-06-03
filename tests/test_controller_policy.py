@@ -30,6 +30,18 @@ def test_adaptive_strategy_returns_placeholder_action() -> None:
     assert action.input_resolution == cfg["runtime"]["default_input_resolution"]
 
 
+def test_classify_runtime_state() -> None:
+    cfg = load_config(ROOT / "configs" / "default.yaml", "scene_thermal_coadaptive")
+    ctrl = RuntimeDecisionController(cfg)
+    state = ctrl.classify_runtime_state(
+        {"workload": "heavy"},
+        {"thermal_state": "warm", "temp_c": 70.0},
+    )
+    assert state["workload"] == "heavy"
+    assert state["thermal_state"] == "warm"
+    assert state["temp_c"] == 70.0
+
+
 def test_unknown_thermal_balanced() -> None:
     cfg = load_config(ROOT / "configs" / "default.yaml", "default")
     ctrl = RuntimeDecisionController(cfg)

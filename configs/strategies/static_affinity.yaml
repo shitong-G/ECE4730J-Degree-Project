@@ -1,0 +1,12 @@
+strategy:
+  name: static_affinity
+  description: Fixed runtime with CPU affinity pinned to cores 0-2
+
+policy:
+  use_scene: false
+  use_thermal: false
+  fixed_inference_interval: 1
+  fixed_input_resolution: 640
+  fixed_cpu_threads: 3
+  fixed_cpu_affinity: [0, 1, 2]
+  fixed_governor: performance

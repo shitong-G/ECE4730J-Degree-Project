@@ -1,0 +1,12 @@
+strategy:
+  name: fixed_low_power
+  description: Static low-power configuration regardless of scene or thermal state
+
+policy:
+  use_scene: false
+  use_thermal: false
+  fixed_inference_interval: 4
+  fixed_input_resolution: 320
+  fixed_cpu_threads: 2
+  fixed_cpu_affinity: [0, 1]
+  fixed_governor: powersave

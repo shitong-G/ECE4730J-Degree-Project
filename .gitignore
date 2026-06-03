@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Project artifacts
+experiments/logs/*.csv
+!experiments/logs/example.csv
+experiments/logs/*.jsonl
+!experiments/logs/.gitkeep
+experiments/results/*
+!experiments/results/.gitkeep
+data/
+models/
+*.onnx
+*.pt
+*.pth
+
+# Third-party (cloned separately)
+third_party/RT-DETR/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Coverage / test
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/

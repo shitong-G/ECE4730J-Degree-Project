@@ -1,0 +1,12 @@
+strategy:
+  name: scene_thermal_coadaptive
+  description: Full co-adaptive policy using both scene workload and device thermal state
+
+policy:
+  use_scene: true
+  use_thermal: true
+  fixed_inference_interval: null
+  fixed_input_resolution: null
+  fixed_cpu_threads: null
+  fixed_cpu_affinity: null
+  fixed_governor: null

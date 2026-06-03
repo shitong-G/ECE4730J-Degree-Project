@@ -1,0 +1,28 @@
+project:
+  name: scene-runtime
+  strategy: default
+
+runtime:
+  default_input_resolution: 640
+  default_inference_interval: 1
+  default_cpu_threads: 4
+  dry_run_latency_ms: 45.0
+
+thermal:
+  normal_max_c: 65.0
+  warm_max_c: 75.0
+
+scene:
+  light_edge_density_max: 0.08
+  light_motion_max: 0.05
+  heavy_edge_density_min: 0.18
+  heavy_motion_min: 0.15
+  heavy_detection_count_min: 8
+
+logging:
+  output_dir: experiments/logs
+  format: csv
+
+inference:
+  model_path: null
+  onnx_providers: ["CPUExecutionProvider"]

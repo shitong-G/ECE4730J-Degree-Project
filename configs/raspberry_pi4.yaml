@@ -1,0 +1,18 @@
+# Raspberry Pi 4 (4GB) profile
+extends: default.yaml
+
+device:
+  platform: raspberry_pi4
+  cpu_count: 4
+
+runtime:
+  default_input_resolution: 480
+  default_inference_interval: 2
+  default_cpu_threads: 3
+
+thermal:
+  normal_max_c: 60.0
+  warm_max_c: 72.0
+
+inference:
+  model_path: models/rtdetr_r18_pi4.onnx

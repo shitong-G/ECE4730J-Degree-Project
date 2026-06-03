@@ -1,0 +1,12 @@
+numpy>=1.24.0
+opencv-python>=4.8.0
+PyYAML>=6.0
+onnxruntime>=1.16.0; platform_system != "Darwin" or platform_machine != "arm64"
+
+# Development / testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Plotting (optional for analysis scripts)
+matplotlib>=3.7.0
+pandas>=2.0.0

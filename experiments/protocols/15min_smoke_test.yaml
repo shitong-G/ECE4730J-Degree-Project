@@ -1,0 +1,12 @@
+protocol:
+  name: 15min_smoke_test
+  duration_min: 15
+  description: Short validation run for pipeline and logging
+
+strategies:
+  - scene_thermal_coadaptive
+  - fixed_low_power
+
+video: data/sample.mp4
+config: configs/raspberry_pi4.yaml
+warmup_frames: 30

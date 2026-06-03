@@ -1,0 +1,18 @@
+# Raspberry Pi 5 profile
+extends: default.yaml
+
+device:
+  platform: raspberry_pi5
+  cpu_count: 4
+
+runtime:
+  default_input_resolution: 640
+  default_inference_interval: 1
+  default_cpu_threads: 4
+
+thermal:
+  normal_max_c: 65.0
+  warm_max_c: 78.0
+
+inference:
+  model_path: models/rtdetr_r18_pi5.onnx

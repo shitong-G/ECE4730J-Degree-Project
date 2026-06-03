@@ -1,0 +1,13 @@
+protocol:
+  name: 60min_sustained_test
+  duration_min: 60
+  description: Long thermal stress test
+
+strategies:
+  - scene_thermal_coadaptive
+  - static_affinity
+  - fixed_low_power
+
+video: data/sample.mp4
+config: configs/raspberry_pi5.yaml
+warmup_frames: 90

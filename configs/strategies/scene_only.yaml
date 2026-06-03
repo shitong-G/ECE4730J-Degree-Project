@@ -1,0 +1,12 @@
+strategy:
+  name: scene_only
+  description: Adapt runtime based on scene workload only; ignore thermal state
+
+policy:
+  use_scene: true
+  use_thermal: false
+  fixed_inference_interval: null
+  fixed_input_resolution: null
+  fixed_cpu_threads: null
+  fixed_cpu_affinity: null
+  fixed_governor: null

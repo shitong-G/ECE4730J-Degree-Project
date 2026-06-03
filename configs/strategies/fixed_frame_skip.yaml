@@ -1,0 +1,12 @@
+strategy:
+  name: fixed_frame_skip
+  description: Fixed frame skipping (interval=3) at medium resolution
+
+policy:
+  use_scene: false
+  use_thermal: false
+  fixed_inference_interval: 3
+  fixed_input_resolution: 480
+  fixed_cpu_threads: 4
+  fixed_cpu_affinity: null
+  fixed_governor: null

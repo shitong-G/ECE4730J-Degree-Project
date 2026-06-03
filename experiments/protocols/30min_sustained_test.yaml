@@ -1,0 +1,15 @@
+protocol:
+  name: 30min_sustained_test
+  duration_min: 30
+  description: Sustained workload for thermal and FPS stability
+
+strategies:
+  - fixed_low_power
+  - fixed_frame_skip
+  - thermal_only
+  - scene_only
+  - scene_thermal_coadaptive
+
+video: data/sample.mp4
+config: configs/raspberry_pi4.yaml
+warmup_frames: 60

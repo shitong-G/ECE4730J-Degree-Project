@@ -1,0 +1,12 @@
+strategy:
+  name: thermal_only
+  description: Adapt runtime based on device temperature only; ignore scene workload
+
+policy:
+  use_scene: false
+  use_thermal: true
+  fixed_inference_interval: null
+  fixed_input_resolution: null
+  fixed_cpu_threads: null
+  fixed_cpu_affinity: null
+  fixed_governor: null

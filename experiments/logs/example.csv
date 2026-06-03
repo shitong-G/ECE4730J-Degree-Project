@@ -1,0 +1,6 @@
+timestamp,frame_id,strategy,workload,temp_c,freq_mhz_avg,power_w,latency_ms,fps,input_resolution,inference_interval,cpu_threads,governor,decoder_layers,query_budget,detection_count,confidence_mean
+1710000000.0,0,scene_thermal_coadaptive,light,,,,0.0,10.0,480,3,2,powersave,,100,1,0.72
+1710000000.1,1,scene_thermal_coadaptive,light,,,,45.2,9.5,480,3,2,powersave,,100,2,0.68
+1710000000.2,2,scene_thermal_coadaptive,medium,,,,0.0,9.8,640,1,4,performance,,300,3,0.81
+1710000000.3,3,scene_thermal_coadaptive,medium,,,,44.8,9.2,640,1,4,performance,,300,2,0.75
+1710000000.4,4,scene_thermal_coadaptive,heavy,,,,46.1,8.9,640,1,4,performance,,300,4,0.79

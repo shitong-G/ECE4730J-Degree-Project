@@ -33,6 +33,9 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         self._dry_run_latency_ms = dry_run_latency_ms
         self._providers = providers or ["CPUExecutionProvider"]
         self._session: Any = None
+        self._input_names: list[str] = []
+        self._output_names: list[str] = []
+        self._fixed_input_size: int | None = None
 
     def load(self) -> None:
         """Load ONNX session or no-op in dry-run mode."""
@@ -56,7 +59,43 @@ class ONNXRTDETREngine(BaseInferenceEngine):
             self._model_path,
             providers=self._providers,
         )
-        # TODO: cache input/output names and expected shapes from RT-DETR export
+        self._input_names = [i.name for i in self._session.get_inputs()]
+        self._output_names = [o.name for o in self._session.get_outputs()]
+        self._fixed_input_size = self._read_fixed_input_size()
+
+    def _read_fixed_input_size(self) -> int | None:
+        """Return fixed H=W when the ONNX image input has static spatial dims."""
+        if self._session is None:
+            return None
+        shape = self._session.get_inputs()[0].shape
+        if len(shape) != 4:
+            return None
+        height, width = shape[2], shape[3]
+        if isinstance(height, int) and isinstance(width, int) and height == width:
+            return height
+        return None
+
+    def _resolve_input_resolution(self, requested: int) -> int:
+        """Use the exported ONNX spatial size when the model fixes H and W."""
+        if self._fixed_input_size is not None:
+            return self._fixed_input_size
+        return requested
+
+    def _build_feeds(self, blob: np.ndarray, input_resolution: int) -> dict[str, np.ndarray]:
+        """Map preprocessed tensors to RT-DETR ONNX inputs."""
+        feeds: dict[str, np.ndarray] = {}
+        orig_sizes = np.array(
+            [[input_resolution, input_resolution]],
+            dtype=np.int64,
+        )
+        for name in self._input_names:
+            if name == "images":
+                feeds[name] = blob
+            elif name == "orig_target_sizes":
+                feeds[name] = orig_sizes
+            else:
+                raise ValueError(f"Unsupported ONNX input: {name}")
+        return feeds
 
     def preprocess(self, frame: np.ndarray, input_resolution: int) -> np.ndarray:
         """BGR resize, RGB, normalize — adjust to match RT-DETR export."""
@@ -72,15 +111,16 @@ class ONNXRTDETREngine(BaseInferenceEngine):
 
     def infer(self, frame: np.ndarray, config: RuntimeAction) -> list[Detection]:
         """Run inference or dry-run simulation."""
-        blob = self.preprocess(frame, config.input_resolution)
         if self._dry_run:
             time.sleep(self._dry_run_latency_ms / 1000.0)
             return self._fake_detections(config)
         if self._session is None:
             raise RuntimeError("Engine not loaded. Call load() first.")
-        # TODO: map blob to correct input name; apply decoder_layers / query_budget if ONNX supports
-        input_name = self._session.get_inputs()[0].name
-        outputs = self._session.run(None, {input_name: blob})
+
+        input_resolution = self._resolve_input_resolution(config.input_resolution)
+        blob = self.preprocess(frame, input_resolution)
+        feeds = self._build_feeds(blob, input_resolution)
+        outputs = self._session.run(self._output_names, feeds)
         return self.postprocess(list(outputs))
 
     def _fake_detections(self, config: RuntimeAction) -> list[Detection]:

@@ -24,13 +24,28 @@ def postprocess_rtdetr_outputs(
     """
     Convert RT-DETR ONNX raw tensors to ``Detection`` list.
 
-    TODO: align with actual exported ONNX output names and shapes from RT-DETR export.
-    Expected placeholder layout: [boxes (N,4), scores (N,), labels (N,)].
+    Official export order: ``labels``, ``boxes``, ``scores`` with batch dimension.
     """
-    if not raw_outputs:
+    if len(raw_outputs) < 3:
         return []
-    # TODO: implement real RT-DETR decode when model is available
-    return []
+
+    labels = np.asarray(raw_outputs[0])[0]
+    boxes = np.asarray(raw_outputs[1])[0]
+    scores = np.asarray(raw_outputs[2])[0]
+
+    detections: list[Detection] = []
+    for label, box, score in zip(labels, boxes, scores):
+        if float(score) < score_threshold:
+            continue
+        x1, y1, x2, y2 = (float(v) for v in box[:4])
+        detections.append(
+            Detection(
+                class_id=int(label),
+                score=float(score),
+                bbox=(x1, y1, x2, y2),
+            )
+        )
+    return detections
 
 
 def detections_summary(detections: list[Detection]) -> dict[str, Any]:

@@ -1,0 +1,19 @@
+# Raspberry Pi 4 (1GB) constrained-memory profile
+extends: default.yaml
+
+device:
+  platform: raspberry_pi4
+  cpu_count: 4
+
+runtime:
+  default_input_resolution: 320
+  default_inference_interval: 4
+  default_cpu_threads: 2
+
+thermal:
+  normal_max_c: 58.0
+  warm_max_c: 68.0
+
+inference:
+  model_path: models/rtdetr_r18_pi4.onnx
+  onnx_providers: ["CPUExecutionProvider"]

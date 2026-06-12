@@ -37,6 +37,19 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         self._output_names: list[str] = []
         self._fixed_input_size: int | None = None
 
+        self._last_profile: dict[str, float] = {
+            "preprocess_ms": 0.0,
+            "build_feed_ms": 0.0,
+            "onnx_run_ms": 0.0,
+            "postprocess_ms": 0.0,
+            "infer_total_ms": 0.0,
+        }
+
+    @property
+    def last_profile(self) -> dict[str, float]:
+        """Return timing profile from the most recent infer() call."""
+        return dict(self._last_profile)
+        
     def load(self) -> None:
         """Load ONNX session or no-op in dry-run mode."""
         if self._dry_run:
@@ -110,18 +123,49 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         return postprocess_rtdetr_outputs(raw_outputs)
 
     def infer(self, frame: np.ndarray, config: RuntimeAction) -> list[Detection]:
-        """Run inference or dry-run simulation."""
+        """Run inference or dry-run simulation, with module-level timing."""
+        profile = {
+            "preprocess_ms": 0.0,
+            "build_feed_ms": 0.0,
+            "onnx_run_ms": 0.0,
+            "postprocess_ms": 0.0,
+            "infer_total_ms": 0.0,
+        }
+    
+        total_t0 = time.perf_counter()
+    
         if self._dry_run:
             time.sleep(self._dry_run_latency_ms / 1000.0)
-            return self._fake_detections(config)
+            detections = self._fake_detections(config)
+            profile["infer_total_ms"] = (time.perf_counter() - total_t0) * 1000.0
+            self._last_profile = profile
+            return detections
+    
         if self._session is None:
             raise RuntimeError("Engine not loaded. Call load() first.")
-
+    
         input_resolution = self._resolve_input_resolution(config.input_resolution)
+    
+        t0 = time.perf_counter()
         blob = self.preprocess(frame, input_resolution)
+        profile["preprocess_ms"] = (time.perf_counter() - t0) * 1000.0
+    
+        t0 = time.perf_counter()
         feeds = self._build_feeds(blob, input_resolution)
+        profile["build_feed_ms"] = (time.perf_counter() - t0) * 1000.0
+    
+        t0 = time.perf_counter()
         outputs = self._session.run(self._output_names, feeds)
-        return self.postprocess(list(outputs))
+        profile["onnx_run_ms"] = (time.perf_counter() - t0) * 1000.0
+    
+        t0 = time.perf_counter()
+        detections = self.postprocess(list(outputs))
+        profile["postprocess_ms"] = (time.perf_counter() - t0) * 1000.0
+    
+        profile["infer_total_ms"] = (time.perf_counter() - total_t0) * 1000.0
+        self._last_profile = profile
+    
+        return detections
 
     def _fake_detections(self, config: RuntimeAction) -> list[Detection]:
         """Generate plausible fake detections for dry-run experiments."""

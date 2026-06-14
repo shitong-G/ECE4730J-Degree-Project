@@ -20,7 +20,6 @@ from scene_runtime.scene.workload_estimator import SceneWorkloadEstimator
 from scene_runtime.utils.timing import Timer
 from scene_runtime.utils.video import FrameSource
 
-from scene_runtime.runtime.profile_logger import ProfileLogger, ProfileRecord
 
 class RuntimeLoop:
     """
@@ -85,134 +84,67 @@ class RuntimeLoop:
         self._prev_frame: np.ndarray | None = None
         self._current_action: RuntimeAction | None = None
 
-        profile_log_path = self._log_path.with_name(
-            self._log_path.stem + "_profile.csv"
-        )
-        self._profile_logger = ProfileLogger(profile_log_path)
-        self._profile_log_path = profile_log_path
-
     def run(self) -> Path:
         """Execute the 7-step per-frame loop until duration or source ends."""
         self._engine.load()
         self._logger.open()
-        self._profile_logger.open()
-
         start = time.perf_counter()
+
         try:
             for frame in self._source:
                 if self._duration_sec and (time.perf_counter() - start) >= self._duration_sec:
                     break
+
                 self._process_frame(frame)
         finally:
-            self._profile_logger.close()
             self._logger.close()
             self._source.release()
 
         return self._log_path
 
-    def _elapsed_ms(self, t0: float) -> float:
-        return (time.perf_counter() - t0) * 1000.0
-
     def _process_frame(self, frame: np.ndarray) -> None:
-        """One iteration of the 7-step runtime workflow, with profiling."""
-        frame_t0 = time.perf_counter()
-
+        """One iteration of the 7-step runtime workflow."""
         self._metrics.mark_frame()
 
-        # Step 2 — scene workload estimation
-        t0 = time.perf_counter()
+        # Step 1 — capture (frame supplied by FrameSource / camera / video)
+        # Step 2 — lightweight scene features + workload label (stub classifier)
         scene_state = self._scene.update(frame, self._prev_frame, self._history)
-        scene_ms = self._elapsed_ms(t0)
 
-        # Step 3 — device state
-        t0 = time.perf_counter()
+        # Step 3 — SoC temp, freq, throttling (feeds back next frame via re-read)
         device_state = self._device.snapshot(self._config)
-        device_ms = self._elapsed_ms(t0)
 
-        # Step 4 — runtime state classification
-        t0 = time.perf_counter()
+        # Step 4 — fuse scene × thermal runtime state
         runtime_state = self._controller.classify_runtime_state(scene_state, device_state)
-        runtime_state_ms = self._elapsed_ms(t0)
 
-        # Step 5 — runtime action decision
-        t0 = time.perf_counter()
+        # Step 5 — Layer Router & Schedule → RuntimeAction (query_budget, decoder_layers, …)
         action = self._controller.decide(
             scene_state,
             device_state,
             self._metrics.snapshot(),
         )
-        decision_ms = self._elapsed_ms(t0)
-
         self._current_action = action
-        _ = runtime_state
+        _ = runtime_state  # logged indirectly via scene_state + device_state columns
 
-        # Step 6 — inference or skip
+        # Step 6 — infer or skip frame; reuse last detections when skipping
         run_infer = (self._inference_counter % action.inference_interval) == 0
-
         latency_ms = 0.0
-        infer_outer_ms = 0.0
-        infer_profile = {
-            "preprocess_ms": 0.0,
-            "build_feed_ms": 0.0,
-            "onnx_run_ms": 0.0,
-            "postprocess_ms": 0.0,
-            "infer_total_ms": 0.0,
-        }
 
         if run_infer:
-            t0 = time.perf_counter()
-            self._last_detections = self._engine.infer(frame, action)
-            infer_outer_ms = self._elapsed_ms(t0)
-
-            infer_profile = self._engine.last_profile
-            latency_ms = float(infer_profile.get("infer_total_ms", infer_outer_ms))
-
+            with Timer() as t:
+                self._last_detections = self._engine.infer(frame, action)
+            latency_ms = t.elapsed_ms
             self._metrics.record_latency(latency_ms)
-
-        # Detection summary
-        t0 = time.perf_counter()
-        summary = detections_summary(self._last_detections)
-        summary_ms = self._elapsed_ms(t0)
-
-        if run_infer:
+            summary = detections_summary(self._last_detections)
             self._history.push(
                 summary["detection_count"],
                 [d.score for d in self._last_detections],
                 latency_ms,
             )
+        else:
+            summary = detections_summary(self._last_detections)
 
-        # Original main log
-        t0 = time.perf_counter()
+        # Step 7 — log + update detection history / metrics for next decision
         self._write_log(scene_state, device_state, action, summary, latency_ms)
-        main_log_write_ms = self._elapsed_ms(t0)
-
-        frame_total_ms = self._elapsed_ms(frame_t0)
-
-        self._profile_logger.write(
-            ProfileRecord(
-                timestamp=time.time(),
-                frame_id=self._frame_id,
-                strategy=self._strategy,
-                did_infer=run_infer,
-
-                frame_total_ms=frame_total_ms,
-                scene_ms=scene_ms,
-                device_ms=device_ms,
-                runtime_state_ms=runtime_state_ms,
-                decision_ms=decision_ms,
-
-                infer_outer_ms=infer_outer_ms,
-                preprocess_ms=float(infer_profile.get("preprocess_ms", 0.0)),
-                build_feed_ms=float(infer_profile.get("build_feed_ms", 0.0)),
-                onnx_run_ms=float(infer_profile.get("onnx_run_ms", 0.0)),
-                postprocess_ms=float(infer_profile.get("postprocess_ms", 0.0)),
-                infer_total_ms=float(infer_profile.get("infer_total_ms", latency_ms)),
-
-                summary_ms=summary_ms,
-                main_log_write_ms=main_log_write_ms,
-            )
-        )
-
         self._prev_frame = frame.copy()
         self._inference_counter += 1
         self._frame_id += 1

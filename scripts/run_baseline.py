@@ -20,8 +20,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config", type=Path, default=ROOT / "configs" / "default.yaml")
     p.add_argument(
         "--strategy",
-        default="fixed_low_power",
+        default="native_rtdetr",
         choices=[
+            "native_rtdetr",
             "default",
             "static_affinity",
             "fixed_low_power",

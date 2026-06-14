@@ -1,0 +1,12 @@
+strategy:
+  name: native_rtdetr
+  description: Native RT-DETR baseline without scene/thermal adaptation or frame skipping
+
+policy:
+  use_scene: false
+  use_thermal: false
+  fixed_inference_interval: 1
+  fixed_input_resolution: 640
+  fixed_cpu_threads: 4
+  fixed_cpu_affinity: null
+  fixed_governor: performance

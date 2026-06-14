@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
         "--strategy",
         default="scene_thermal_coadaptive",
         choices=[
+            "native_rtdetr",
             "default",
             "static_affinity",
             "fixed_low_power",

@@ -135,6 +135,7 @@ Export ONNX first: `bash scripts/export_model_onnx.sh` (see `third_party/README.
 
 | Strategy | Description |
 |----------|-------------|
+| `native_rtdetr` | Non-adaptive RT-DETR baseline |
 | `default` | Balanced adaptive policy |
 | `static_affinity` | Fixed config + CPU affinity |
 | `fixed_low_power` | Static low power |

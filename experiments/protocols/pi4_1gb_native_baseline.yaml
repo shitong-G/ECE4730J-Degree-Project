@@ -1,0 +1,46 @@
+name: pi4_1gb_native_baseline
+description: Native RT-DETR baseline on Raspberry Pi 4 1GB
+
+device:
+  board: Raspberry Pi 4
+  memory_gb: 1
+  os: Ubuntu 22.04 arm64
+
+model:
+  detector: RT-DETR-R18
+  format: ONNX
+  path: models/rtdetr_r18_pi4.onnx
+  execution_provider: CPUExecutionProvider
+
+runtime:
+  config: configs/raspberry_pi4_1gb.yaml
+  strategy: native_rtdetr
+  duration_min: 5
+  video: data/sample.mp4
+  repeats: 3
+  cooldown_min_between_repeats: 5
+
+outputs:
+  log_dir: experiments/logs/baseline_native
+  result_dir: experiments/results/baseline_native
+  summary_metrics:
+    - wall_time_sec
+    - total_frames
+    - inference_frames
+    - skipped_frames
+    - latency_ms_mean
+    - latency_ms_median
+    - latency_ms_p95
+    - latency_ms_p99
+    - latency_ms_max
+    - fps_mean
+    - fps_median
+    - fps_min
+    - fps_max
+    - temp_c_start
+    - temp_c_end
+    - temp_c_mean
+    - temp_c_max
+    - freq_mhz_avg_mean
+    - detection_count_mean
+    - confidence_mean

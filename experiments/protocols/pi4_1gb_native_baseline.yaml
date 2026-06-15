@@ -7,9 +7,9 @@ device:
   os: Ubuntu 22.04 arm64
 
 model:
-  detector: RT-DETR-R18
+  detector: RT-DETRv2-R18-lite
   format: ONNX
-  path: models/rtdetr_r18_pi4.onnx
+  path: models/rtdetr_r18_lite_pi4.onnx
   execution_provider: CPUExecutionProvider
 
 runtime:

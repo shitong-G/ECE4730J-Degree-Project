@@ -23,6 +23,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=ROOT / "experiments" / "results",
     )
+    p.add_argument(
+        "--max-frame-id",
+        type=int,
+        default=None,
+        help="Only plot rows with frame_id < this value (e.g. 260 keeps frames 0-259)",
+    )
     return p.parse_args()
 
 
@@ -40,8 +46,16 @@ def main() -> None:
         sys.exit(1)
 
     df = pd.read_csv(args.input)
+    if args.max_frame_id is not None:
+        df = df[df["frame_id"] < args.max_frame_id].copy()
+        if df.empty:
+            print(f"No rows with frame_id < {args.max_frame_id}")
+            sys.exit(1)
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     stem = args.input.stem
+    if args.max_frame_id is not None:
+        stem = f"{stem}_frames0-{args.max_frame_id - 1}"
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     fig.suptitle(f"Experiment: {stem}")
@@ -77,6 +91,21 @@ def main() -> None:
     fig.tight_layout()
     fig.savefig(out, dpi=120)
     print(f"Saved plot: {out}")
+
+    if "freq_mhz_avg" in df.columns and df["freq_mhz_avg"].notna().any():
+        fig_freq, ax_freq = plt.subplots(figsize=(12, 4))
+        ax_freq.plot(df["frame_id"], df["freq_mhz_avg"], color="steelblue", linewidth=0.8)
+        ax_freq.set_title(f"CPU frequency (MHz)")
+        ax_freq.set_xlabel("frame_id")
+        ax_freq.set_ylabel("MHz")
+        ax_freq.grid(True, alpha=0.3)
+        freq_out = args.output_dir / f"{stem}_cpu_freq.png"
+        fig_freq.tight_layout()
+        fig_freq.savefig(freq_out, dpi=120)
+        plt.close(fig_freq)
+        print(f"Saved plot: {freq_out}")
+
+    plt.close(fig)
 
 
 if __name__ == "__main__":

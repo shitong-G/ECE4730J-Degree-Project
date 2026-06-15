@@ -56,11 +56,25 @@ bash scripts/export_model_onnx.sh
 # Place exported model at path configured in configs/raspberry_pi4.yaml
 ```
 
-For the 1GB profile, place the exported lightweight RT-DETR-R18 ONNX model at:
+For the 1GB profile, place the exported RT-DETRv2 R18 lite ONNX model at:
 
 ```bash
-models/rtdetr_r18_pi4.onnx
+models/rtdetr_r18_lite_pi4.onnx
 ```
+
+Export on a workstation (not on the Pi):
+
+```bash
+conda create -n rtdetr-export python=3.10 -y
+conda activate rtdetr-export
+bash scripts/setup_rtdetr_export_env.sh
+bash scripts/clone_rtdetr.sh
+bash scripts/export_model_onnx.sh          # default: RT-DETRv2 R18 lite (sp1)
+# or: bash scripts/export_model_onnx.sh rtdetrv2-s   # RT-DETRv2-S (higher AP)
+# or: bash scripts/export_model_onnx.sh v1           # legacy RT-DETR v1 R18
+```
+
+If export fails with NumPy errors, ensure `numpy<2` (torch 2.1 is not compatible with NumPy 2.x).
 
 ## Run on Pi 4GB+ / Pi 5
 

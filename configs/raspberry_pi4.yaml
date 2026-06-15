@@ -15,4 +15,4 @@ thermal:
   warm_max_c: 72.0
 
 inference:
-  model_path: models/rtdetr_r18_pi4.onnx
+  model_path: models/rtdetr_r18_lite_pi4.onnx

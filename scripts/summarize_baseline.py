@@ -82,6 +82,7 @@ def summarize(rows: list[dict[str, str]], label: str) -> dict[str, float | int |
     fps = _series(rows, "fps")
     temps = _series(rows, "temp_c")
     freqs = _series(rows, "freq_mhz_avg")
+    arm_clocks = _series(rows, "arm_clock_mhz")
     detections = _series(rows, "detection_count")
     confidences = _series(rows, "confidence_mean")
 
@@ -106,6 +107,9 @@ def summarize(rows: list[dict[str, str]], label: str) -> dict[str, float | int |
         "temp_c_mean": _stat(temps, "mean"),
         "temp_c_max": _stat(temps, "max"),
         "freq_mhz_avg_mean": _stat(freqs, "mean"),
+        "arm_clock_mhz_mean": _stat(arm_clocks, "mean"),
+        "arm_clock_mhz_min": _stat(arm_clocks, "min"),
+        "arm_clock_mhz_max": _stat(arm_clocks, "max"),
         "detection_count_mean": _stat(detections, "mean"),
         "confidence_mean": _stat(confidences, "mean"),
     }

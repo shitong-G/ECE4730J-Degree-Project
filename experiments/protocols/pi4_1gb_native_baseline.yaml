@@ -42,5 +42,8 @@ outputs:
     - temp_c_mean
     - temp_c_max
     - freq_mhz_avg_mean
+    - arm_clock_mhz_mean
+    - arm_clock_mhz_min
+    - arm_clock_mhz_max
     - detection_count_mean
     - confidence_mean

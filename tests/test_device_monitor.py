@@ -10,6 +10,7 @@ def test_snapshot_keys() -> None:
     snap = mon.snapshot()
     assert "temp_c" in snap
     assert "freq_mhz_avg" in snap
+    assert "arm_clock_mhz" in snap
     assert "thermal_state" in snap
     assert snap["thermal_state"] in ("normal", "warm", "hot", "unknown")
 

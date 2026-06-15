@@ -92,10 +92,33 @@ def main() -> None:
     fig.savefig(out, dpi=120)
     print(f"Saved plot: {out}")
 
-    if "freq_mhz_avg" in df.columns and df["freq_mhz_avg"].notna().any():
+    freq_col = None
+    freq_label = "CPU frequency (MHz)"
+    if "arm_clock_mhz" in df.columns and df["arm_clock_mhz"].notna().any():
+        freq_col = "arm_clock_mhz"
+        freq_label = "ARM clock (MHz, actual)"
+    elif "freq_mhz_avg" in df.columns and df["freq_mhz_avg"].notna().any():
+        freq_col = "freq_mhz_avg"
+        freq_label = "CPU frequency sysfs (MHz, governor)"
+
+    if freq_col is not None:
         fig_freq, ax_freq = plt.subplots(figsize=(12, 4))
-        ax_freq.plot(df["frame_id"], df["freq_mhz_avg"], color="steelblue", linewidth=0.8)
-        ax_freq.set_title(f"CPU frequency (MHz)")
+        ax_freq.plot(df["frame_id"], df[freq_col], color="steelblue", linewidth=0.8)
+        if (
+            freq_col == "arm_clock_mhz"
+            and "freq_mhz_avg" in df.columns
+            and df["freq_mhz_avg"].notna().any()
+        ):
+            ax_freq.plot(
+                df["frame_id"],
+                df["freq_mhz_avg"],
+                color="lightgray",
+                linewidth=0.8,
+                alpha=0.8,
+                label="sysfs scaling_cur_freq",
+            )
+            ax_freq.legend(loc="best")
+        ax_freq.set_title(freq_label)
         ax_freq.set_xlabel("frame_id")
         ax_freq.set_ylabel("MHz")
         ax_freq.grid(True, alpha=0.3)

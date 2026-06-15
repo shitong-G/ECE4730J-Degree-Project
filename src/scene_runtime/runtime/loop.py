@@ -232,6 +232,7 @@ class RuntimeLoop:
             workload=scene_state.get("workload", "medium"),
             temp_c=device_state.get("temp_c"),
             freq_mhz_avg=device_state.get("freq_mhz_avg"),
+            arm_clock_mhz=device_state.get("arm_clock_mhz"),
             power_w=device_state.get("power_w"),
             latency_ms=latency_ms,
             fps=self._metrics.fps,

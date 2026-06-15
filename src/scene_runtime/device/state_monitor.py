@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from scene_runtime.device.arm_clock import read_arm_clock_mhz
 from scene_runtime.device.frequency import read_cpu_frequencies_mhz
 from scene_runtime.device.power import read_power_w
 from scene_runtime.device.temperature import read_temperature_c
@@ -20,6 +21,10 @@ class DeviceStateMonitor:
     def read_temperature_c(self) -> float | None:
         """Current CPU temperature in Celsius."""
         return read_temperature_c()
+
+    def read_arm_clock_mhz(self) -> float | None:
+        """Actual ARM core clock from firmware (MHz), or None if unavailable."""
+        return read_arm_clock_mhz()
 
     def read_cpu_frequency_mhz(self) -> dict[str, float | int]:
         """Per-CPU and average frequency in MHz."""
@@ -58,7 +63,8 @@ class DeviceStateMonitor:
         Returns
         -------
         dict
-            Keys: temp_c, freq_mhz, freq_mhz_avg, power_w, throttling, thermal_state.
+            Keys: temp_c, freq_mhz, freq_mhz_avg, arm_clock_mhz, power_w,
+            throttling, thermal_state.
         """
         freq = self.read_cpu_frequency_mhz()
         avg = freq.get("avg_mhz")
@@ -66,6 +72,7 @@ class DeviceStateMonitor:
             "temp_c": self.read_temperature_c(),
             "freq_mhz": {k: v for k, v in freq.items() if k != "avg_mhz"},
             "freq_mhz_avg": avg,
+            "arm_clock_mhz": self.read_arm_clock_mhz(),
             "power_w": self.read_power_w(),
             "throttling": self.read_throttling_state(),
             "thermal_state": self.thermal_state(config),

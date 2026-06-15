@@ -132,4 +132,11 @@ echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governo
 
 ## Thermal Monitoring
 
-Temperature is read from `/sys/class/thermal/thermal_zone0/temp`. Throttling via `vcgencmd get_throttled` when available.
+Temperature is read from `/sys/class/thermal/thermal_zone0/temp`.
+
+CPU frequency in experiment CSV logs:
+
+- `arm_clock_mhz` — actual ARM clock from `vcgencmd measure_clock arm` (reflects firmware throttling)
+- `freq_mhz_avg` — Linux sysfs `scaling_cur_freq` average (may stay at governor max while throttled)
+
+Throttling flags via `vcgencmd get_throttled` when available. Install `libraspberrypi-bin` for `vcgencmd` on Pi OS / Ubuntu.

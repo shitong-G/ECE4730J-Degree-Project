@@ -15,6 +15,7 @@ LOG_COLUMNS = [
     "workload",
     "temp_c",
     "freq_mhz_avg",
+    "arm_clock_mhz",
     "power_w",
     "latency_ms",
     "fps",
@@ -39,6 +40,7 @@ class LogRecord:
     workload: str
     temp_c: float | None
     freq_mhz_avg: float | None
+    arm_clock_mhz: float | None
     power_w: float | None
     latency_ms: float
     fps: float

@@ -15,6 +15,12 @@ experiments/
 python scripts/run_experiment.py --dry-run --strategy scene_thermal_coadaptive --duration-min 1
 ```
 
+## Run Experiments
+```bash
+python scripts/run_experiment.py --config configs/raspberry_pi4.yaml --strategy native_rtdetr --video data/sample.mp4 --duration-min 15
+```
+For detailed Experiment intructions, see Experiments.md 
+
 ## Logs
 
 Logs are written to `experiments/logs/` by default. See root `README.md` for the column schema.

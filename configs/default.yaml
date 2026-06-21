@@ -7,10 +7,20 @@ runtime:
   default_inference_interval: 1
   default_cpu_threads: 4
   dry_run_latency_ms: 45.0
+  metrics_window_frames: 120
 
 thermal:
   normal_max_c: 65.0
   warm_max_c: 75.0
+  critical_c: 82.0
+  hysteresis_c: 4.0
+  warm_hold_frames: 120
+  hot_hold_frames: 180
+  critical_hold_frames: 240
+  critical_plus_delta_c: 3.0
+  critical_max_delta_c: 7.0
+  pressure_hysteresis_c: 2.0
+  pressure_hold_frames: 120
 
 scene:
   light_edge_density_max: 0.08

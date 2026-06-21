@@ -75,7 +75,9 @@ class RuntimeLoop:
         default_log = Path(log_cfg.get("output_dir", "experiments/logs")) / f"run_{strategy}.csv"
         self._log_path = log_path or default_log
         self._logger = RuntimeLogger(self._log_path, fmt=log_cfg.get("format", "csv"))
-        self._metrics = MetricsTracker()
+        self._metrics = MetricsTracker(
+            window=int(runtime_cfg.get("metrics_window_frames", 120))
+        )
         self._strategy = strategy
 
         self._frame_id = 0
@@ -144,7 +146,7 @@ class RuntimeLoop:
             summary = detections_summary(self._last_detections)
 
         # Step 7 — log + update detection history / metrics for next decision
-        self._write_log(scene_state, device_state, action, summary, latency_ms)
+        self._write_log(scene_state, device_state, action, summary, latency_ms, run_infer)
         self._prev_frame = frame.copy()
         self._inference_counter += 1
         self._frame_id += 1
@@ -156,18 +158,26 @@ class RuntimeLoop:
         action: RuntimeAction,
         summary: dict[str, Any],
         latency_ms: float,
+        did_infer: bool,
     ) -> None:
+        loop_fps = self._metrics.fps
+        effective_inference_fps = loop_fps / max(action.inference_interval, 1)
         record = LogRecord(
             timestamp=time.time(),
             frame_id=self._frame_id,
             strategy=self._strategy,
             workload=scene_state.get("workload", "medium"),
+            thermal_state=device_state.get("thermal_state"),
+            action_mode=action.mode,
             temp_c=device_state.get("temp_c"),
             freq_mhz_avg=device_state.get("freq_mhz_avg"),
             arm_clock_mhz=device_state.get("arm_clock_mhz"),
             power_w=device_state.get("power_w"),
+            did_infer=did_infer,
             latency_ms=latency_ms,
-            fps=self._metrics.fps,
+            fps=loop_fps,
+            loop_fps=loop_fps,
+            effective_inference_fps=effective_inference_fps,
             input_resolution=action.input_resolution,
             inference_interval=action.inference_interval,
             cpu_threads=action.cpu_threads,

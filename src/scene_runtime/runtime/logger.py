@@ -13,12 +13,17 @@ LOG_COLUMNS = [
     "frame_id",
     "strategy",
     "workload",
+    "thermal_state",
+    "action_mode",
     "temp_c",
     "freq_mhz_avg",
     "arm_clock_mhz",
     "power_w",
+    "did_infer",
     "latency_ms",
     "fps",
+    "loop_fps",
+    "effective_inference_fps",
     "input_resolution",
     "inference_interval",
     "cpu_threads",
@@ -38,12 +43,17 @@ class LogRecord:
     frame_id: int
     strategy: str
     workload: str
+    thermal_state: str | None
+    action_mode: str | None
     temp_c: float | None
     freq_mhz_avg: float | None
     arm_clock_mhz: float | None
     power_w: float | None
+    did_infer: bool
     latency_ms: float
     fps: float
+    loop_fps: float
+    effective_inference_fps: float
     input_resolution: int
     inference_interval: int
     cpu_threads: int

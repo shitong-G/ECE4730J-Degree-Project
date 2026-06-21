@@ -21,6 +21,8 @@ class FrameSource:
         Generate blank frames when no video (for dry-run without sample video).
     max_frames:
         Optional cap on frames for short tests.
+    loop:
+        Restart a video file from the first frame when EOF is reached.
     """
 
     def __init__(
@@ -30,11 +32,13 @@ class FrameSource:
         synthetic: bool = False,
         synthetic_size: tuple[int, int] = (640, 480),
         max_frames: int | None = None,
+        loop: bool = False,
     ) -> None:
         self._video = video
         self._synthetic = synthetic
         self._synthetic_size = synthetic_size
         self._max_frames = max_frames
+        self._loop = loop
         self._cap: cv2.VideoCapture | None = None
         self._count = 0
 
@@ -61,7 +65,12 @@ class FrameSource:
             else:
                 ok, frame = self._cap.read()
                 if not ok:
-                    break
+                    if not self._loop:
+                        break
+                    self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ok, frame = self._cap.read()
+                    if not ok:
+                        break
             yield frame
             self._count += 1
 

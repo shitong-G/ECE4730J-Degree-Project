@@ -34,15 +34,36 @@ def parse_args() -> argparse.Namespace:
         ],
     )
     p.add_argument("--video", type=Path, default=None, help="Video path or omit for synthetic")
+    p.add_argument(
+        "--loop-video",
+        action="store_true",
+        help="Loop the input video until duration-min is reached",
+    )
     p.add_argument("--dry-run", action="store_true", help="Simulate inference without ONNX model")
     p.add_argument("--duration-min", type=float, default=15.0)
     p.add_argument("--output", type=Path, default=None, help="CSV log output path")
+    p.add_argument(
+        "--thermal-state",
+        choices=["normal", "warm", "hot", "critical", "unknown"],
+        default=None,
+        help="Override detected thermal state for policy testing on non-Pi machines",
+    )
+    p.add_argument(
+        "--thermal-temp-c",
+        type=float,
+        default=None,
+        help="Override detected temperature in Celsius for thermal policy testing",
+    )
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     config = load_config(args.config, args.strategy)
+    if args.thermal_state is not None:
+        config.setdefault("thermal", {})["override_state"] = args.thermal_state
+    if args.thermal_temp_c is not None:
+        config.setdefault("thermal", {})["override_temp_c"] = args.thermal_temp_c
 
     if args.output is None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -55,8 +76,9 @@ def main() -> None:
 
     source = FrameSource(
         args.video,
-        synthetic=args.dry_run or args.video is None,
+        synthetic=args.video is None,
         max_frames=max_frames,
+        loop=args.loop_video,
     )
 
     loop = RuntimeLoop(

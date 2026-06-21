@@ -1,6 +1,7 @@
 """Tests for RT-DETR ONNX post-processing."""
 
 import numpy as np
+import pytest
 
 from scene_runtime.inference.postprocess import postprocess_rtdetr_outputs
 
@@ -17,6 +18,6 @@ def test_postprocess_rtdetr_outputs_filters_by_score() -> None:
 
     assert len(detections) == 2
     assert detections[0].class_id == 1
-    assert detections[0].score == 0.9
+    assert detections[0].score == pytest.approx(0.9)
     assert detections[0].bbox == (10.0, 20.0, 30.0, 40.0)
     assert detections[1].class_id == 3

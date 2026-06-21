@@ -80,6 +80,8 @@ def summarize(rows: list[dict[str, str]], label: str) -> dict[str, float | int |
     timestamps = _series(rows, "timestamp")
     latencies = _positive_series(rows, "latency_ms")
     fps = _series(rows, "fps")
+    loop_fps = _series(rows, "loop_fps") or fps
+    effective_inference_fps = _series(rows, "effective_inference_fps")
     temps = _series(rows, "temp_c")
     freqs = _series(rows, "freq_mhz_avg")
     arm_clocks = _series(rows, "arm_clock_mhz")
@@ -102,6 +104,11 @@ def summarize(rows: list[dict[str, str]], label: str) -> dict[str, float | int |
         "fps_median": _stat(fps, "median"),
         "fps_min": _stat(fps, "min"),
         "fps_max": _stat(fps, "max"),
+        "loop_fps_mean": _stat(loop_fps, "mean"),
+        "effective_inference_fps_mean": _stat(effective_inference_fps, "mean"),
+        "effective_inference_fps_median": _stat(effective_inference_fps, "median"),
+        "effective_inference_fps_min": _stat(effective_inference_fps, "min"),
+        "effective_inference_fps_max": _stat(effective_inference_fps, "max"),
         "temp_c_start": temps[0] if temps else None,
         "temp_c_end": temps[-1] if temps else None,
         "temp_c_mean": _stat(temps, "mean"),

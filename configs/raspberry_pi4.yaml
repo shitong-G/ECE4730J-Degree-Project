@@ -9,10 +9,20 @@ runtime:
   default_input_resolution: 480
   default_inference_interval: 2
   default_cpu_threads: 3
+  metrics_window_frames: 180
 
 thermal:
-  normal_max_c: 60.0
-  warm_max_c: 72.0
+  normal_max_c: 58.0
+  warm_max_c: 66.0
+  critical_c: 76.0
+  hysteresis_c: 5.0
+  warm_hold_frames: 180
+  hot_hold_frames: 300
+  critical_hold_frames: 450
+  critical_plus_delta_c: 2.0
+  critical_max_delta_c: 5.0
+  pressure_hysteresis_c: 2.0
+  pressure_hold_frames: 180
 
 inference:
   model_path: models/rtdetr_r18_lite_pi4.onnx

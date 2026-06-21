@@ -28,3 +28,6 @@ python scripts/plot_results.py --input experiments/logs/<run>.csv
 ```
 
 Output figures go to `experiments/results/`.
+
+For all post-run plotting and statistical analysis scripts, see
+`docs/post_experiment_analysis.md`.

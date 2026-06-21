@@ -40,21 +40,29 @@ class DeviceStateMonitor:
 
     def thermal_state(self, config: dict[str, Any] | None = None) -> str:
         """
-        Map temperature to ``normal``, ``warm``, ``hot``, or ``unknown``.
+        Map temperature to ``normal``, ``warm``, ``hot``, ``critical``, or ``unknown``.
 
         Thresholds are configurable via YAML ``thermal`` section.
         """
-        temp = self.read_temperature_c()
+        cfg = (config or {}).get("thermal", {})
+        override = cfg.get("override_state")
+        if override in {"normal", "warm", "hot", "critical", "unknown"}:
+            return override
+
+        override_temp = cfg.get("override_temp_c")
+        temp = float(override_temp) if override_temp is not None else self.read_temperature_c()
         if temp is None:
             return "unknown"
-        cfg = (config or {}).get("thermal", {})
         normal_max = float(cfg.get("normal_max_c", 65.0))
         warm_max = float(cfg.get("warm_max_c", 75.0))
+        critical = float(cfg.get("critical_c", warm_max + 7.0))
         if temp < normal_max:
             return "normal"
         if temp < warm_max:
             return "warm"
-        return "hot"
+        if temp < critical:
+            return "hot"
+        return "critical"
 
     def snapshot(self, config: dict[str, Any] | None = None) -> dict[str, Any]:
         """
@@ -66,10 +74,12 @@ class DeviceStateMonitor:
             Keys: temp_c, freq_mhz, freq_mhz_avg, arm_clock_mhz, power_w,
             throttling, thermal_state.
         """
+        cfg = (config or {}).get("thermal", {})
+        override_temp = cfg.get("override_temp_c")
         freq = self.read_cpu_frequency_mhz()
         avg = freq.get("avg_mhz")
         return {
-            "temp_c": self.read_temperature_c(),
+            "temp_c": float(override_temp) if override_temp is not None else self.read_temperature_c(),
             "freq_mhz": {k: v for k, v in freq.items() if k != "avg_mhz"},
             "freq_mhz_avg": avg,
             "arm_clock_mhz": self.read_arm_clock_mhz(),

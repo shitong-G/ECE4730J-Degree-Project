@@ -32,6 +32,7 @@ def parse_args() -> argparse.Namespace:
         ],
     )
     p.add_argument("--video", type=Path, default=None)
+    p.add_argument("--loop-video", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--duration-min", type=float, default=15.0)
     p.add_argument("--output", type=Path, default=None)
@@ -44,8 +45,9 @@ def main() -> None:
     duration_sec = args.duration_min * 60.0
     source = FrameSource(
         args.video,
-        synthetic=args.dry_run or args.video is None,
+        synthetic=args.video is None,
         max_frames=int(duration_sec * 10) if args.dry_run else None,
+        loop=args.loop_video,
     )
     loop = RuntimeLoop(
         config,

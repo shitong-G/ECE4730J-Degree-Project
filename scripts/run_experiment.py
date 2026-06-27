@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
             "fixed_low_power",
             "fixed_frame_skip",
             "thermal_only",
+            "thermal_balanced",
             "scene_only",
             "scene_thermal_coadaptive",
         ],
@@ -54,6 +55,21 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override detected temperature in Celsius for thermal policy testing",
     )
+    p.add_argument(
+        "--enable-thread-sessions",
+        action="store_true",
+        help="Preload ONNX Runtime sessions for configured cpu thread counts",
+    )
+    p.add_argument(
+        "--thread-session-counts",
+        default=None,
+        help="Comma-separated thread counts, e.g. 1,2,3,4",
+    )
+    p.add_argument(
+        "--apply-runtime-actions",
+        action="store_true",
+        help="Best-effort apply governor and CPU affinity from RuntimeAction",
+    )
     return p.parse_args()
 
 
@@ -64,6 +80,13 @@ def main() -> None:
         config.setdefault("thermal", {})["override_state"] = args.thermal_state
     if args.thermal_temp_c is not None:
         config.setdefault("thermal", {})["override_temp_c"] = args.thermal_temp_c
+    if args.enable_thread_sessions:
+        config.setdefault("inference", {})["enable_thread_sessions"] = True
+    if args.thread_session_counts:
+        counts = [int(item.strip()) for item in args.thread_session_counts.split(",") if item.strip()]
+        config.setdefault("inference", {})["thread_session_counts"] = counts
+    if args.apply_runtime_actions:
+        config.setdefault("os_control", {})["apply_runtime_actions"] = True
 
     if args.output is None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")

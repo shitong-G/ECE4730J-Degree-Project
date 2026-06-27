@@ -17,6 +17,9 @@ LOG_COLUMNS = [
     "raw_thermal_state",
     "control_thermal_state",
     "action_mode",
+    "decision_reason",
+    "thermal_pressure_level",
+    "temp_slope_c_per_min",
     "temp_c",
     "freq_mhz_avg",
     "arm_clock_mhz",
@@ -36,6 +39,12 @@ LOG_COLUMNS = [
     "inference_interval",
     "cpu_threads",
     "governor",
+    "requested_governor",
+    "applied_governor",
+    "governor_applied",
+    "requested_cpu_affinity",
+    "applied_cpu_affinity",
+    "cpu_affinity_applied",
     "decoder_layers",
     "query_budget",
     "detection_count",
@@ -55,6 +64,9 @@ class LogRecord:
     raw_thermal_state: str | None
     control_thermal_state: str | None
     action_mode: str | None
+    decision_reason: str | None
+    thermal_pressure_level: int | None
+    temp_slope_c_per_min: float
     temp_c: float | None
     freq_mhz_avg: float | None
     arm_clock_mhz: float | None
@@ -74,6 +86,12 @@ class LogRecord:
     inference_interval: int
     cpu_threads: int
     governor: str | None
+    requested_governor: str | None
+    applied_governor: str | None
+    governor_applied: bool | None
+    requested_cpu_affinity: str | None
+    applied_cpu_affinity: str | None
+    cpu_affinity_applied: bool | None
     decoder_layers: int | None
     query_budget: int | None
     detection_count: int

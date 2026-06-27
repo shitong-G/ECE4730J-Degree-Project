@@ -27,12 +27,17 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         dry_run: bool = False,
         dry_run_latency_ms: float = 45.0,
         providers: list[str] | None = None,
+        enable_thread_sessions: bool = False,
+        thread_session_counts: list[int] | None = None,
     ) -> None:
         self._model_path = model_path
         self._dry_run = dry_run
         self._dry_run_latency_ms = dry_run_latency_ms
         self._providers = providers or ["CPUExecutionProvider"]
         self._session: Any = None
+        self._sessions_by_threads: dict[int, Any] = {}
+        self._enable_thread_sessions = enable_thread_sessions
+        self._thread_session_counts = sorted(set(thread_session_counts or []))
         self._input_names: list[str] = []
         self._output_names: list[str] = []
         self._fixed_input_size: int | None = None
@@ -67,14 +72,45 @@ class ONNXRTDETREngine(BaseInferenceEngine):
                 "Install with: pip install onnxruntime"
             ) from e
 
-        # TODO: set session options for cpu_threads from RuntimeAction
-        self._session = ort.InferenceSession(
-            self._model_path,
-            providers=self._providers,
-        )
+        if self._enable_thread_sessions:
+            counts = self._thread_session_counts or [1, 2, 3, 4]
+            for threads in counts:
+                self._sessions_by_threads[int(threads)] = self._create_session(
+                    ort,
+                    int(threads),
+                )
+            self._session = self._sessions_by_threads[counts[0]]
+        else:
+            self._session = self._create_session(ort, None)
         self._input_names = [i.name for i in self._session.get_inputs()]
         self._output_names = [o.name for o in self._session.get_outputs()]
         self._fixed_input_size = self._read_fixed_input_size()
+
+    def _create_session(self, ort: Any, cpu_threads: int | None) -> Any:
+        """Create one ONNX Runtime session, optionally pinning intra-op threads."""
+        if cpu_threads is None:
+            return ort.InferenceSession(
+                self._model_path,
+                providers=self._providers,
+            )
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = int(cpu_threads)
+        options.inter_op_num_threads = 1
+        return ort.InferenceSession(
+            self._model_path,
+            sess_options=options,
+            providers=self._providers,
+        )
+
+    def _select_session(self, requested_threads: int) -> Any:
+        """Return the pre-created session nearest to the requested thread count."""
+        if not self._sessions_by_threads:
+            return self._session
+        requested = int(requested_threads)
+        if requested in self._sessions_by_threads:
+            return self._sessions_by_threads[requested]
+        closest = min(self._sessions_by_threads, key=lambda value: abs(value - requested))
+        return self._sessions_by_threads[closest]
 
     def _read_fixed_input_size(self) -> int | None:
         """Return fixed H=W when the ONNX image input has static spatial dims."""
@@ -155,7 +191,8 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         profile["build_feed_ms"] = (time.perf_counter() - t0) * 1000.0
     
         t0 = time.perf_counter()
-        outputs = self._session.run(self._output_names, feeds)
+        session = self._select_session(config.cpu_threads)
+        outputs = session.run(self._output_names, feeds)
         profile["onnx_run_ms"] = (time.perf_counter() - t0) * 1000.0
     
         t0 = time.perf_counter()

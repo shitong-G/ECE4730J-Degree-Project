@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
             "fixed_low_power",
             "fixed_frame_skip",
             "thermal_only",
+            "thermal_balanced",
             "scene_only",
             "scene_thermal_coadaptive",
         ],

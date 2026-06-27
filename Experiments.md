@@ -1061,7 +1061,7 @@ the analysis pipeline:
 python scripts/generate_thermal_test_logs.py \
   --output-dir experiments/logs/synthetic_thermal \
   --duration-sec 900 \
-  --strategies native_rtdetr,fixed_frame_skip,fixed_low_power,thermal_only
+  --strategies native_rtdetr,fixed_frame_skip,fixed_low_power,thermal_only,thermal_balanced
 ```
 
 Then summarize and plot one generated run:
@@ -1177,7 +1177,10 @@ python scripts/run_thermal_experiment_suite.py \
   --video data/sample.mp4 \
   --loop-video \
   --duration-min 15 \
-  --cooldown-sec 120
+  --repeats 3 \
+  --cooldown-temp-c 55 \
+  --cooldown-poll-sec 15 \
+  --max-cooldown-min 30
 ```
 
 Default suite strategies:
@@ -1187,10 +1190,13 @@ native_rtdetr
 fixed_frame_skip
 fixed_low_power
 thermal_only
+thermal_balanced
 ```
 
 Use `--dry-run` for a quick pipeline check, or `--skip-plot` if pandas/matplotlib
-are not installed on the target device.
+are not installed on the target device. `--cooldown-temp-c` waits until the Pi
+has cooled below the target temperature before starting the next run; if
+temperature is unavailable, the script continues after the fixed cooldown.
 
 ---
 
@@ -1369,8 +1375,9 @@ confidence_mean
 | Experiment | Strategy                   | Goal                                       |
 | ---------- | -------------------------- | ------------------------------------------ |
 | E          | `thermal_only`             | Evaluate temperature-only control pipeline |
-| F          | `scene_only`               | Evaluate scene-only control pipeline       |
-| G          | `scene_thermal_coadaptive` | Evaluate full co-adaptive runtime pipeline |
+| F          | `thermal_balanced`         | Evaluate gentler thermal budget control    |
+| G          | `scene_only`               | Evaluate scene-only control pipeline       |
+| H          | `scene_thermal_coadaptive` | Evaluate full co-adaptive runtime pipeline |
 
 Current limitation:
 

@@ -154,6 +154,20 @@ def test_thermal_only_ignores_scene_but_reacts_to_hot_device() -> None:
     assert action.query_budget == 100
 
 
+def test_thermal_balanced_caps_critical_interval() -> None:
+    cfg = load_config(ROOT / "configs" / "default.yaml", "thermal_balanced")
+    ctrl = RuntimeDecisionController(cfg)
+    action = ctrl.decide(
+        {"workload": "medium"},
+        {"thermal_state": "critical", "temp_c": 89.0},
+    )
+    assert action.mode == "scene_medium_thermal_critical_max"
+    assert action.inference_interval == 10
+    assert action.query_budget == 50
+    assert ctrl.last_thermal_pressure_level == 2
+    assert ctrl.last_decision_reason == "critical_pressure_2"
+
+
 def test_scene_only_ignores_hot_thermal_state() -> None:
     cfg = load_config(ROOT / "configs" / "default.yaml", "scene_only")
     ctrl = RuntimeDecisionController(cfg)

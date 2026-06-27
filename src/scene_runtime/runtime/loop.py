@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from scene_runtime.controller.actions import RuntimeAction
+from scene_runtime.device.action_applier import AppliedRuntimeState, RuntimeActionApplier
 from scene_runtime.controller.runtime_controller import RuntimeDecisionController
 from scene_runtime.device.state_monitor import DeviceStateMonitor
 from scene_runtime.inference.onnx_engine import ONNXRTDETREngine
@@ -62,6 +63,10 @@ class RuntimeLoop:
         self._device = DeviceStateMonitor()
         self._controller = RuntimeDecisionController(config)
         self._history = DetectionHistory()
+        os_control_cfg = config.get("os_control", {})
+        self._action_applier = RuntimeActionApplier(
+            enabled=bool(os_control_cfg.get("apply_runtime_actions", False))
+        )
 
         runtime_cfg = config.get("runtime", {})
         infer_cfg = config.get("inference", {})
@@ -70,6 +75,8 @@ class RuntimeLoop:
             dry_run=dry_run,
             dry_run_latency_ms=float(runtime_cfg.get("dry_run_latency_ms", 45.0)),
             providers=infer_cfg.get("onnx_providers"),
+            enable_thread_sessions=bool(infer_cfg.get("enable_thread_sessions", False)),
+            thread_session_counts=infer_cfg.get("thread_session_counts"),
         )
 
         log_cfg = config.get("logging", {})
@@ -147,6 +154,7 @@ class RuntimeLoop:
 
         self._current_action = action
         _ = runtime_state
+        applied_state = self._action_applier.apply(action)
 
         # Step 6 — inference or skip
         run_infer = (self._inference_counter % action.inference_interval) == 0
@@ -186,7 +194,15 @@ class RuntimeLoop:
 
         # Original main log
         t0 = time.perf_counter()
-        self._write_log(scene_state, device_state, action, summary, latency_ms, run_infer)
+        self._write_log(
+            scene_state,
+            device_state,
+            action,
+            applied_state,
+            summary,
+            latency_ms,
+            run_infer,
+        )
         main_log_write_ms = self._elapsed_ms(t0)
 
         frame_total_ms = self._elapsed_ms(frame_t0)
@@ -225,6 +241,7 @@ class RuntimeLoop:
         scene_state: dict[str, Any],
         device_state: dict[str, Any],
         action: RuntimeAction,
+        applied_state: AppliedRuntimeState,
         summary: dict[str, Any],
         latency_ms: float,
         did_infer: bool,
@@ -244,6 +261,9 @@ class RuntimeLoop:
             raw_thermal_state=raw_thermal_state,
             control_thermal_state=control_thermal_state,
             action_mode=action.mode,
+            decision_reason=self._controller.last_decision_reason,
+            thermal_pressure_level=self._controller.last_thermal_pressure_level,
+            temp_slope_c_per_min=self._controller.last_temp_slope_c_per_min,
             temp_c=device_state.get("temp_c"),
             freq_mhz_avg=device_state.get("freq_mhz_avg"),
             arm_clock_mhz=device_state.get("arm_clock_mhz"),
@@ -263,6 +283,12 @@ class RuntimeLoop:
             inference_interval=action.inference_interval,
             cpu_threads=action.cpu_threads,
             governor=action.governor,
+            requested_governor=applied_state.requested_governor,
+            applied_governor=applied_state.applied_governor,
+            governor_applied=applied_state.governor_applied,
+            requested_cpu_affinity=applied_state.requested_cpu_affinity,
+            applied_cpu_affinity=applied_state.applied_cpu_affinity,
+            cpu_affinity_applied=applied_state.cpu_affinity_applied,
             decoder_layers=action.decoder_layers,
             query_budget=action.query_budget,
             detection_count=summary["detection_count"],

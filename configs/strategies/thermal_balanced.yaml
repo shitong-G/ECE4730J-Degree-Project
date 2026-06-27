@@ -1,0 +1,13 @@
+strategy:
+  name: thermal_balanced
+  description: Thermal-aware policy with gentler cooldown and faster recovery than thermal_only
+
+policy:
+  use_scene: false
+  use_thermal: true
+  thermal_balanced: true
+  fixed_inference_interval: null
+  fixed_input_resolution: null
+  fixed_cpu_threads: null
+  fixed_cpu_affinity: null
+  fixed_governor: null

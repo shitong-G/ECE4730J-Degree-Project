@@ -19,10 +19,23 @@ thermal:
   warm_hold_frames: 180
   hot_hold_frames: 300
   critical_hold_frames: 450
+  warm_hold_sec: 30.0
+  hot_hold_sec: 45.0
+  critical_hold_sec: 60.0
   critical_plus_delta_c: 2.0
   critical_max_delta_c: 5.0
   pressure_hysteresis_c: 2.0
   pressure_hold_frames: 180
+  pressure_hold_sec: 45.0
+  target_c: 80.0
+  recovery_slope_c_per_min: -0.15
+  preemptive_slope_c_per_min: 0.4
+  balanced_interval_cap: 12
 
 inference:
   model_path: models/rtdetr_r18_lite_pi4.onnx
+  enable_thread_sessions: false
+  thread_session_counts: [1, 2, 3, 4]
+
+os_control:
+  apply_runtime_actions: false

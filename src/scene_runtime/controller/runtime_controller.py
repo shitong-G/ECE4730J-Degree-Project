@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from scene_runtime.controller.actions import RuntimeAction
@@ -42,18 +43,39 @@ class RuntimeDecisionController:
             "hot": int(thermal.get("hot_hold_frames", 180)),
             "critical": int(thermal.get("critical_hold_frames", 240)),
         }
+        self._thermal_hold_sec = {
+            "normal": 0.0,
+            "warm": float(thermal.get("warm_hold_sec", 30.0)),
+            "hot": float(thermal.get("hot_hold_sec", 45.0)),
+            "critical": float(thermal.get("critical_hold_sec", 60.0)),
+        }
         self._critical_plus_delta_c = float(thermal.get("critical_plus_delta_c", 3.0))
         self._critical_max_delta_c = float(thermal.get("critical_max_delta_c", 7.0))
         self._pressure_hysteresis_c = float(
             thermal.get("pressure_hysteresis_c", max(1.0, self._hysteresis_c / 2.0))
         )
         self._pressure_hold_frames = int(thermal.get("pressure_hold_frames", 120))
+        self._pressure_hold_sec = float(thermal.get("pressure_hold_sec", 45.0))
+        self._target_c = float(thermal.get("target_c", self._warm_max_c + 8.0))
+        self._recovery_slope_c_per_min = float(
+            thermal.get("recovery_slope_c_per_min", -0.15)
+        )
+        self._preemptive_slope_c_per_min = float(
+            thermal.get("preemptive_slope_c_per_min", 0.4)
+        )
+        self._balanced_interval_cap = int(thermal.get("balanced_interval_cap", 12))
         self._thermal_guard_state = "normal"
         self._thermal_hold_remaining = 0
+        self._thermal_hold_until = 0.0
         self._critical_pressure_level = 0
         self._pressure_hold_remaining = 0
+        self._pressure_hold_until = 0.0
         self._last_raw_thermal_state = "unknown"
         self._last_control_thermal_state = "unknown"
+        self._last_decision_reason = "init"
+        self._last_thermal_pressure_level = 0
+        self._last_temp_slope_c_per_min = 0.0
+        self._last_temp_sample: tuple[float, float] | None = None
 
     @property
     def last_raw_thermal_state(self) -> str:
@@ -64,6 +86,21 @@ class RuntimeDecisionController:
     def last_control_thermal_state(self) -> str:
         """Most recent thermal state actually used to select the runtime action."""
         return self._last_control_thermal_state
+
+    @property
+    def last_decision_reason(self) -> str:
+        """Short explanation for the most recent thermal/action decision."""
+        return self._last_decision_reason
+
+    @property
+    def last_thermal_pressure_level(self) -> int:
+        """Most recent critical pressure level used by the controller."""
+        return self._last_thermal_pressure_level
+
+    @property
+    def last_temp_slope_c_per_min(self) -> float:
+        """Most recent temperature slope estimate in degrees C per minute."""
+        return self._last_temp_slope_c_per_min
 
     def classify_runtime_state(
         self,
@@ -111,6 +148,7 @@ class RuntimeDecisionController:
         _ = recent_metrics  # reserved for future latency-aware rules
 
         self._last_raw_thermal_state = str(device_state.get("thermal_state", "unknown"))
+        self._update_temp_slope(device_state.get("temp_c"))
         runtime_state = self.classify_runtime_state(scene_state, device_state)
         thermal_state = runtime_state["thermal_state"]
         if self._config.get("policy", {}).get("use_thermal", True):
@@ -198,10 +236,15 @@ class RuntimeDecisionController:
         if thermal == "warm":
             near_hot = self._temp_at_least(temp_c, self._warm_max_c - 2.0)
             interval_boost = 2 if near_hot else 1
+            if self._is_balanced_thermal_policy():
+                interval_boost = 1
+            self._last_decision_reason = "warm_near_hot" if near_hot else "warm_preemptive"
             return RuntimeAction(
                 mode=f"{action.mode}_thermal_warm",
                 input_resolution=self._lower_resolution(action.input_resolution, steps=1),
-                inference_interval=max(action.inference_interval + interval_boost, 2),
+                inference_interval=self._cap_interval(
+                    max(action.inference_interval + interval_boost, 2)
+                ),
                 cpu_threads=max(1, min(action.cpu_threads, self._default_threads - 1)),
                 governor="ondemand",
                 decoder_layers=self._min_optional(action.decoder_layers, 4),
@@ -210,11 +253,16 @@ class RuntimeDecisionController:
 
         if thermal == "hot":
             near_critical = self._temp_at_least(temp_c, self._critical_c - 2.0)
-            interval_boost = 5 if near_critical else 3
+            interval_boost = 4 if near_critical else 2
+            if not self._is_balanced_thermal_policy():
+                interval_boost = 5 if near_critical else 3
+            self._last_decision_reason = "hot_near_critical" if near_critical else "hot_cooldown"
             return RuntimeAction(
                 mode=f"{action.mode}_thermal_hot_plus" if near_critical else f"{action.mode}_thermal_hot",
                 input_resolution=self._lower_resolution(action.input_resolution, steps=2),
-                inference_interval=max(action.inference_interval + interval_boost, 4),
+                inference_interval=self._cap_interval(
+                    max(action.inference_interval + interval_boost, 4)
+                ),
                 cpu_threads=max(1, min(action.cpu_threads, 2)),
                 governor="powersave",
                 decoder_layers=self._min_optional(action.decoder_layers, 2 if near_critical else 3),
@@ -222,23 +270,45 @@ class RuntimeDecisionController:
             )
 
         critical_level = self._guarded_critical_pressure_level(temp_c)
-        if critical_level >= 2:
+        if self._is_balanced_thermal_policy():
+            if critical_level >= 2:
+                mode = f"{action.mode}_thermal_critical_max"
+                interval = max(action.inference_interval + 8, 10)
+                query_budget = 50
+            elif critical_level == 1:
+                mode = f"{action.mode}_thermal_critical_plus"
+                interval = max(action.inference_interval + 6, 8)
+                query_budget = 60
+            else:
+                mode = f"{action.mode}_thermal_critical"
+                interval = max(action.inference_interval + 4, 6)
+                query_budget = 80
+            if self._is_cooling_fast_enough(temp_c):
+                interval = max(4, interval - 2)
+                mode = f"{mode}_recovery"
+                self._last_decision_reason = "critical_recovery"
+            else:
+                self._last_decision_reason = f"critical_pressure_{critical_level}"
+        elif critical_level >= 2:
             mode = f"{action.mode}_thermal_critical_max"
             interval = max(action.inference_interval + 14, 16)
             query_budget = 40
+            self._last_decision_reason = "critical_max_pressure"
         elif critical_level == 1:
             mode = f"{action.mode}_thermal_critical_plus"
             interval = max(action.inference_interval + 10, 12)
             query_budget = 50
+            self._last_decision_reason = "critical_plus_pressure"
         else:
             mode = f"{action.mode}_thermal_critical"
             interval = max(action.inference_interval + 6, 8)
             query_budget = 60
+            self._last_decision_reason = "critical_cooldown"
 
         return RuntimeAction(
             mode=mode,
             input_resolution=320,
-            inference_interval=interval,
+            inference_interval=self._cap_interval(interval),
             cpu_threads=1,
             governor="powersave",
             decoder_layers=2,
@@ -266,8 +336,12 @@ class RuntimeDecisionController:
                 )
             return self._thermal_guard_state
 
-        if self._thermal_hold_remaining > 0:
+        now = time.monotonic()
+        if self._thermal_hold_remaining > 0 or now < self._thermal_hold_until:
             self._thermal_hold_remaining -= 1
+            if self._is_cooling_fast_enough(temp_c) and self._can_cool_down_one_level(temp_c):
+                next_level = max(desired_level, current_level - 1)
+                self._set_thermal_guard(THERMAL_NAMES[next_level])
             return self._thermal_guard_state
 
         if self._can_cool_down_one_level(temp_c):
@@ -288,6 +362,12 @@ class RuntimeDecisionController:
             return "hot"
         if temp >= self._normal_max_c:
             return "warm"
+        if (
+            temp >= self._normal_max_c - 2.0
+            and self._last_temp_slope_c_per_min >= self._preemptive_slope_c_per_min
+        ):
+            self._last_decision_reason = "preemptive_warm_slope"
+            return "warm"
         return "normal"
 
     def _can_cool_down_one_level(self, temp_c: Any) -> bool:
@@ -307,9 +387,12 @@ class RuntimeDecisionController:
     def _set_thermal_guard(self, state: str) -> None:
         self._thermal_guard_state = state
         self._thermal_hold_remaining = self._thermal_hold_frames[state]
+        self._thermal_hold_until = time.monotonic() + self._thermal_hold_sec[state]
         if state != "critical":
             self._critical_pressure_level = 0
             self._pressure_hold_remaining = 0
+            self._pressure_hold_until = 0.0
+            self._last_thermal_pressure_level = 0
 
     @staticmethod
     def _temp_at_least(temp_c: Any, threshold: float) -> bool:
@@ -334,6 +417,8 @@ class RuntimeDecisionController:
         if raw_level > self._critical_pressure_level:
             self._critical_pressure_level = raw_level
             self._pressure_hold_remaining = self._pressure_hold_frames
+            self._pressure_hold_until = time.monotonic() + self._pressure_hold_sec
+            self._last_thermal_pressure_level = self._critical_pressure_level
             return self._critical_pressure_level
 
         if raw_level == self._critical_pressure_level:
@@ -342,10 +427,26 @@ class RuntimeDecisionController:
                     self._pressure_hold_remaining,
                     self._pressure_hold_frames,
                 )
+                self._pressure_hold_until = max(
+                    self._pressure_hold_until,
+                    time.monotonic() + self._pressure_hold_sec,
+                )
+            self._last_thermal_pressure_level = self._critical_pressure_level
             return self._critical_pressure_level
 
-        if self._pressure_hold_remaining > 0:
+        if self._pressure_hold_remaining > 0 or time.monotonic() < self._pressure_hold_until:
             self._pressure_hold_remaining -= 1
+            if self._is_cooling_fast_enough(temp_c) and self._can_reduce_pressure(temp_c):
+                self._critical_pressure_level = max(raw_level, self._critical_pressure_level - 1)
+                self._pressure_hold_remaining = (
+                    self._pressure_hold_frames if self._critical_pressure_level > 0 else 0
+                )
+                self._pressure_hold_until = (
+                    time.monotonic() + self._pressure_hold_sec
+                    if self._critical_pressure_level > 0
+                    else 0.0
+                )
+            self._last_thermal_pressure_level = self._critical_pressure_level
             return self._critical_pressure_level
 
         if self._can_reduce_pressure(temp_c):
@@ -353,7 +454,13 @@ class RuntimeDecisionController:
             self._pressure_hold_remaining = (
                 self._pressure_hold_frames if self._critical_pressure_level > 0 else 0
             )
+            self._pressure_hold_until = (
+                time.monotonic() + self._pressure_hold_sec
+                if self._critical_pressure_level > 0
+                else 0.0
+            )
 
+        self._last_thermal_pressure_level = self._critical_pressure_level
         return self._critical_pressure_level
 
     def _can_reduce_pressure(self, temp_c: Any) -> bool:
@@ -378,3 +485,36 @@ class RuntimeDecisionController:
     def _min_optional(value: int | None, limit: int) -> int:
         """Cap an optional runtime knob, defaulting to the cap when unset."""
         return min(value if value is not None else limit, limit)
+
+    def _update_temp_slope(self, temp_c: Any) -> None:
+        try:
+            temp = float(temp_c)
+        except (TypeError, ValueError):
+            return
+        now = time.monotonic()
+        if self._last_temp_sample is not None:
+            prev_temp, prev_time = self._last_temp_sample
+            dt = now - prev_time
+            if dt > 0:
+                self._last_temp_slope_c_per_min = (temp - prev_temp) / dt * 60.0
+        self._last_temp_sample = (temp, now)
+
+    def _is_cooling_fast_enough(self, temp_c: Any) -> bool:
+        try:
+            temp = float(temp_c)
+        except (TypeError, ValueError):
+            return False
+        if temp > self._target_c + self._hysteresis_c:
+            return False
+        return self._last_temp_slope_c_per_min <= self._recovery_slope_c_per_min
+
+    def _is_balanced_thermal_policy(self) -> bool:
+        strategy = self._config.get("project", {}).get("strategy")
+        return strategy == "thermal_balanced" or bool(
+            self._config.get("policy", {}).get("thermal_balanced", False)
+        )
+
+    def _cap_interval(self, interval: int) -> int:
+        if self._is_balanced_thermal_policy():
+            return min(int(interval), self._balanced_interval_cap)
+        return int(interval)

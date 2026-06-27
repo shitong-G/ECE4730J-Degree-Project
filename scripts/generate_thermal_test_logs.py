@@ -29,6 +29,9 @@ LOG_COLUMNS = [
     "raw_thermal_state",
     "control_thermal_state",
     "action_mode",
+    "decision_reason",
+    "thermal_pressure_level",
+    "temp_slope_c_per_min",
     "temp_c",
     "freq_mhz_avg",
     "arm_clock_mhz",
@@ -48,6 +51,12 @@ LOG_COLUMNS = [
     "inference_interval",
     "cpu_threads",
     "governor",
+    "requested_governor",
+    "applied_governor",
+    "governor_applied",
+    "requested_cpu_affinity",
+    "applied_cpu_affinity",
+    "cpu_affinity_applied",
     "decoder_layers",
     "query_budget",
     "detection_count",
@@ -79,6 +88,7 @@ STRATEGIES = [
     "fixed_frame_skip",
     "fixed_low_power",
     "thermal_only",
+    "thermal_balanced",
 ]
 
 
@@ -107,7 +117,8 @@ def thermal_state(temp_c: float, cfg: dict[str, float]) -> str:
 def build_config(strategy: str) -> dict[str, object]:
     policy = {
         "use_scene": strategy not in {"native_rtdetr", "fixed_frame_skip", "fixed_low_power"},
-        "use_thermal": strategy in {"thermal_only"},
+        "use_thermal": strategy in {"thermal_only", "thermal_balanced"},
+        "thermal_balanced": strategy == "thermal_balanced",
         "fixed_inference_interval": None,
         "fixed_input_resolution": None,
         "fixed_cpu_threads": None,
@@ -180,6 +191,7 @@ def latency_ms(strategy: str, resolution: int, temp_c: float, did_infer: bool) -
         "fixed_frame_skip": 3400.0,
         "fixed_low_power": 2100.0,
         "thermal_only": 3000.0,
+        "thermal_balanced": 2900.0,
     }.get(strategy, 3000.0)
     scale = (resolution / 480.0) ** 1.8
     throttle_penalty = 1.25 if temp_c >= 85.0 else 1.0
@@ -251,6 +263,9 @@ def write_logs(strategy: str, args: argparse.Namespace) -> Path:
                     "raw_thermal_state": ctrl.last_raw_thermal_state,
                     "control_thermal_state": ctrl.last_control_thermal_state,
                     "action_mode": action.mode,
+                    "decision_reason": ctrl.last_decision_reason,
+                    "thermal_pressure_level": ctrl.last_thermal_pressure_level,
+                    "temp_slope_c_per_min": f"{ctrl.last_temp_slope_c_per_min:.3f}",
                     "temp_c": f"{temp_c:.3f}",
                     "freq_mhz_avg": f"{arm_freq:.1f}",
                     "arm_clock_mhz": f"{arm_freq:.1f}",
@@ -270,6 +285,12 @@ def write_logs(strategy: str, args: argparse.Namespace) -> Path:
                     "inference_interval": action.inference_interval,
                     "cpu_threads": action.cpu_threads,
                     "governor": action.governor,
+                    "requested_governor": action.governor,
+                    "applied_governor": "",
+                    "governor_applied": "",
+                    "requested_cpu_affinity": "",
+                    "applied_cpu_affinity": "",
+                    "cpu_affinity_applied": "",
                     "decoder_layers": action.decoder_layers,
                     "query_budget": action.query_budget,
                     "detection_count": detection_count,

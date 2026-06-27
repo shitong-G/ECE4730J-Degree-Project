@@ -14,16 +14,24 @@ LOG_COLUMNS = [
     "strategy",
     "workload",
     "thermal_state",
+    "raw_thermal_state",
+    "control_thermal_state",
     "action_mode",
     "temp_c",
     "freq_mhz_avg",
     "arm_clock_mhz",
     "power_w",
+    "throttling_raw",
+    "under_voltage",
+    "arm_freq_capped",
+    "currently_throttled",
+    "soft_temp_limit",
     "did_infer",
     "latency_ms",
     "fps",
     "loop_fps",
     "effective_inference_fps",
+    "actual_inference_fps",
     "input_resolution",
     "inference_interval",
     "cpu_threads",
@@ -44,16 +52,24 @@ class LogRecord:
     strategy: str
     workload: str
     thermal_state: str | None
+    raw_thermal_state: str | None
+    control_thermal_state: str | None
     action_mode: str | None
     temp_c: float | None
     freq_mhz_avg: float | None
     arm_clock_mhz: float | None
     power_w: float | None
+    throttling_raw: str | None
+    under_voltage: bool | None
+    arm_freq_capped: bool | None
+    currently_throttled: bool | None
+    soft_temp_limit: bool | None
     did_infer: bool
     latency_ms: float
     fps: float
     loop_fps: float
     effective_inference_fps: float
+    actual_inference_fps: float
     input_resolution: int
     inference_interval: int
     cpu_threads: int

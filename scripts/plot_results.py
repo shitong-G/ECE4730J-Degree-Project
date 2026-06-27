@@ -109,6 +109,7 @@ def main() -> None:
         sys.exit(1)
 
     x, xlabel = elapsed_minutes(plot_df, pd)
+    x_all, xlabel_all = elapsed_minutes(df, pd)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     stem = args.input.stem
     if args.max_frame_id is not None:
@@ -128,10 +129,10 @@ def main() -> None:
         axes[0, 0].set_xlabel(xlabel)
         axes[0, 0].legend(loc="best", fontsize=8)
 
-    if "temp_c" in plot_df.columns and plot_df["temp_c"].notna().any():
+    if "temp_c" in df.columns and df["temp_c"].notna().any():
         axes[0, 1].plot(
-            x,
-            smooth(plot_df["temp_c"], args.smooth_window),
+            x_all,
+            smooth(df["temp_c"], args.smooth_window),
             color="tomato",
             linewidth=0.8,
             label="temperature",
@@ -140,32 +141,40 @@ def main() -> None:
     else:
         axes[0, 1].text(0.5, 0.5, "No temperature data", ha="center", va="center")
     axes[0, 1].set_title("CPU temperature (C)")
-    axes[0, 1].set_xlabel(xlabel)
+    axes[0, 1].set_xlabel(xlabel_all)
 
-    if "workload" in plot_df.columns:
+    if "workload" in df.columns:
         wl_map = {"light": 0, "medium": 1, "heavy": 2}
         axes[1, 0].plot(
-            x,
-            plot_df["workload"].map(wl_map),
+            x_all,
+            df["workload"].map(wl_map),
             drawstyle="steps-post",
             linewidth=0.8,
         )
         axes[1, 0].set_yticks([0, 1, 2])
         axes[1, 0].set_yticklabels(["light", "medium", "heavy"])
     axes[1, 0].set_title("Scene workload")
-    axes[1, 0].set_xlabel(xlabel)
+    axes[1, 0].set_xlabel(xlabel_all)
 
-    eff_fps = effective_inference_fps(plot_df)
+    eff_fps = effective_inference_fps(df)
     if eff_fps is not None:
         axes[1, 1].plot(
-            x,
+            x_all,
             smooth(eff_fps, args.smooth_window),
             color="purple",
             linewidth=0.8,
             label="effective inference FPS",
         )
+    if "actual_inference_fps" in df.columns:
+        axes[1, 1].plot(
+            x_all,
+            smooth(df["actual_inference_fps"], args.smooth_window),
+            color="darkgreen",
+            linewidth=0.8,
+            label="actual inference FPS",
+        )
     axes[1, 1].set_title("Effective inference FPS")
-    axes[1, 1].set_xlabel(xlabel)
+    axes[1, 1].set_xlabel(xlabel_all)
     axes[1, 1].legend(loc="best", fontsize=8)
 
     out = args.output_dir / f"{stem}_summary.png"
@@ -214,6 +223,73 @@ def main() -> None:
         fig_freq.savefig(freq_out, dpi=120)
         plt.close(fig_freq)
         print(f"Saved plot: {freq_out}")
+
+    if (
+        "thermal_state" in df.columns
+        or "control_thermal_state" in df.columns
+        or "action_mode" in df.columns
+    ):
+        fig_thermal, axes_thermal = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
+        if "temp_c" in df.columns and df["temp_c"].notna().any():
+            axes_thermal[0].plot(
+                x_all,
+                smooth(df["temp_c"], args.smooth_window),
+                color="tomato",
+                linewidth=0.8,
+                label="temperature",
+            )
+            axes_thermal[0].set_ylabel("C")
+            axes_thermal[0].legend(loc="best", fontsize=8)
+
+        state_map = {"unknown": -1, "normal": 0, "warm": 1, "hot": 2, "critical": 3}
+        for col, color in (
+            ("raw_thermal_state", "lightgray"),
+            ("control_thermal_state", "crimson"),
+            ("thermal_state", "darkred"),
+        ):
+            if col in df.columns:
+                axes_thermal[1].plot(
+                    x_all,
+                    df[col].fillna("unknown").map(state_map),
+                    drawstyle="steps-post",
+                    linewidth=0.9,
+                    label=col,
+                    color=color,
+                )
+        axes_thermal[1].set_yticks([-1, 0, 1, 2, 3])
+        axes_thermal[1].set_yticklabels(["unknown", "normal", "warm", "hot", "critical"])
+        axes_thermal[1].legend(loc="best", fontsize=8)
+
+        if "action_mode" in df.columns:
+            actions = sorted(str(v) for v in df["action_mode"].dropna().unique())
+            action_map = {name: idx for idx, name in enumerate(actions)}
+            axes_thermal[2].plot(
+                x_all,
+                df["action_mode"].map(action_map),
+                drawstyle="steps-post",
+                linewidth=0.8,
+                label="action_mode",
+            )
+            if "did_infer" in df.columns:
+                infer = df["did_infer"].astype(str).str.lower().isin({"true", "1"})
+                axes_thermal[2].scatter(
+                    x_all[infer],
+                    [-0.5] * int(infer.sum()),
+                    s=8,
+                    color="black",
+                    alpha=0.5,
+                    label="did_infer",
+                )
+            axes_thermal[2].set_yticks(list(action_map.values()))
+            axes_thermal[2].set_yticklabels(list(action_map.keys()), fontsize=7)
+            axes_thermal[2].legend(loc="best", fontsize=8)
+        axes_thermal[2].set_xlabel(xlabel_all)
+        fig_thermal.suptitle(f"Thermal control timeline: {stem}")
+        thermal_out = args.output_dir / f"{stem}_thermal_control.png"
+        fig_thermal.tight_layout()
+        fig_thermal.savefig(thermal_out, dpi=120)
+        plt.close(fig_thermal)
+        print(f"Saved plot: {thermal_out}")
 
     plt.close(fig)
 

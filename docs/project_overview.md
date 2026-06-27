@@ -6,9 +6,9 @@
 
 ## Motivation
 
-Edge devices such as the Raspberry Pi must run object detection under varying scene complexity and thermal constraints. This project implements a **scene-aware and thermal-aware embedded runtime manager** around RT-DETR: the runtime observes the scene and SoC temperature, then adjusts decoder depth, query budget, frame schedule, and edge resources.
+Edge devices such as the Raspberry Pi must run object detection under varying scene complexity and thermal constraints. This project implements a **scene-aware and thermal-aware embedded runtime manager** around RT-DETR: the runtime observes the scene and SoC temperature, then adjusts frame schedule, requested resolution, decoder/query hints, and edge-resource hints.
 
-The main contribution is **not** a new full detector backbone, but the **co-adaptation control plane** (Layer Router & Schedule + query selection) on the Pi.
+The main contribution is **not** a new full detector backbone, but the **co-adaptation control plane** on the Pi. Real ONNX inference and Raspberry Pi experiment logs are already available locally; full scene-aware adaptation still needs workload classification to be completed.
 
 ## Per-frame workflow
 
@@ -56,7 +56,9 @@ Logs + Metrics               ← feeds next-frame decisions
 
 ## Status
 
-**Backbone:** workflow wired; adaptive policies and in-model dynamic decoder/query are **TODO** (README 4-member split).
+**Current:** real ONNX Runtime inference is wired, Pi-side logs/results exist locally, and the thermal controller has normal/warm/hot/critical behavior with hysteresis and hold frames.
+
+**Still open:** `SceneWorkloadEstimator.classify_workload()` returns `medium`, so scene-aware control is not complete. `decoder_layers`, `query_budget`, `cpu_threads`, and governor values are logged as policy outputs until downstream ONNX/OS enforcement is implemented and verified.
 
 ## Upstream Dependency
 

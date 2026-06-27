@@ -52,6 +52,18 @@ class RuntimeDecisionController:
         self._thermal_hold_remaining = 0
         self._critical_pressure_level = 0
         self._pressure_hold_remaining = 0
+        self._last_raw_thermal_state = "unknown"
+        self._last_control_thermal_state = "unknown"
+
+    @property
+    def last_raw_thermal_state(self) -> str:
+        """Most recent device-reported thermal state before controller guarding."""
+        return self._last_raw_thermal_state
+
+    @property
+    def last_control_thermal_state(self) -> str:
+        """Most recent thermal state actually used to select the runtime action."""
+        return self._last_control_thermal_state
 
     def classify_runtime_state(
         self,
@@ -98,10 +110,7 @@ class RuntimeDecisionController:
         """
         _ = recent_metrics  # reserved for future latency-aware rules
 
-        fixed = apply_fixed_policy(self._config)
-        if fixed is not None:
-            return fixed
-
+        self._last_raw_thermal_state = str(device_state.get("thermal_state", "unknown"))
         runtime_state = self.classify_runtime_state(scene_state, device_state)
         thermal_state = runtime_state["thermal_state"]
         if self._config.get("policy", {}).get("use_thermal", True):
@@ -109,6 +118,12 @@ class RuntimeDecisionController:
                 thermal_state,
                 runtime_state.get("temp_c"),
             )
+        self._last_control_thermal_state = thermal_state
+
+        fixed = apply_fixed_policy(self._config)
+        if fixed is not None:
+            return fixed
+
         return self._rule_based_action(
             runtime_state["workload"],
             thermal_state,

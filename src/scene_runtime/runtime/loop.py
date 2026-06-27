@@ -170,6 +170,7 @@ class RuntimeLoop:
             latency_ms = float(infer_profile.get("infer_total_ms", infer_outer_ms))
 
             self._metrics.record_latency(latency_ms)
+            self._metrics.record_inference()
 
         # Detection summary
         t0 = time.perf_counter()
@@ -230,22 +231,34 @@ class RuntimeLoop:
     ) -> None:
         loop_fps = self._metrics.fps
         effective_inference_fps = loop_fps / max(action.inference_interval, 1)
+        actual_inference_fps = self._metrics.inference_fps
+        throttling = device_state.get("throttling") or {}
+        raw_thermal_state = self._controller.last_raw_thermal_state
+        control_thermal_state = self._controller.last_control_thermal_state
         record = LogRecord(
             timestamp=time.time(),
             frame_id=self._frame_id,
             strategy=self._strategy,
             workload=scene_state.get("workload", "medium"),
-            thermal_state=device_state.get("thermal_state"),
+            thermal_state=control_thermal_state,
+            raw_thermal_state=raw_thermal_state,
+            control_thermal_state=control_thermal_state,
             action_mode=action.mode,
             temp_c=device_state.get("temp_c"),
             freq_mhz_avg=device_state.get("freq_mhz_avg"),
             arm_clock_mhz=device_state.get("arm_clock_mhz"),
             power_w=device_state.get("power_w"),
+            throttling_raw=throttling.get("raw"),
+            under_voltage=throttling.get("under_voltage"),
+            arm_freq_capped=throttling.get("arm_freq_capped"),
+            currently_throttled=throttling.get("currently_throttled"),
+            soft_temp_limit=throttling.get("soft_temp_limit"),
             did_infer=did_infer,
             latency_ms=latency_ms,
             fps=loop_fps,
             loop_fps=loop_fps,
             effective_inference_fps=effective_inference_fps,
+            actual_inference_fps=actual_inference_fps,
             input_resolution=action.input_resolution,
             inference_interval=action.inference_interval,
             cpu_threads=action.cpu_threads,

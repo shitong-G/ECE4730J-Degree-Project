@@ -136,6 +136,8 @@ def test_thermal_guard_holds_hot_state_before_recovery() -> None:
     assert held_1.mode == "scene_medium_thermal_hot"
     assert held_2.mode == "scene_medium_thermal_hot"
     assert cooled.mode == "scene_medium_thermal_warm"
+    assert ctrl.last_raw_thermal_state == "normal"
+    assert ctrl.last_control_thermal_state == "warm"
 
 
 def test_thermal_only_ignores_scene_but_reacts_to_hot_device() -> None:

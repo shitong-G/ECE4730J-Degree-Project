@@ -63,9 +63,16 @@ Run each strategy on the **same video** and **same duration** for fair compariso
 7. `scene_thermal_coadaptive` — full co-adaptation (proposed)
 8. `default` — balanced default policy
 
+Current interpretation:
+
+- `native_rtdetr`, `fixed_low_power`, and `fixed_frame_skip` are reliable baselines.
+- `thermal_only` is meaningful for validating the current temperature controller.
+- `scene_only` and the scene part of `scene_thermal_coadaptive` require `SceneWorkloadEstimator.classify_workload()` to be implemented before making strong scene-aware claims.
+- `cpu_threads`, governor, `decoder_layers`, and `query_budget` should be reported as policy outputs unless their ONNX/OS enforcement is separately verified.
+
 ## Metrics to Record
 
-Per-frame logs include: workload, temperature, frequency, latency, FPS, resolution, interval, threads, detection count, confidence statistics.
+Per-frame logs include: workload, raw/control thermal state, action mode, whether inference ran, throttling flags, temperature, frequency, latency, FPS, actual inference FPS, resolution, interval, threads, detection count, and confidence statistics.
 
 For baseline tables, report both raw per-frame CSV and summary metrics from
 `scripts/summarize_baseline.py`: wall time, frame count, inference frame count,

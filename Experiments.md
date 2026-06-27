@@ -205,10 +205,20 @@ runtime:
   default_inference_interval: 1
   default_cpu_threads: 4
   dry_run_latency_ms: 45.0
+  metrics_window_frames: 120
 
 thermal:
   normal_max_c: 65.0
   warm_max_c: 75.0
+  critical_c: 82.0
+  hysteresis_c: 4.0
+  warm_hold_frames: 120
+  hot_hold_frames: 180
+  critical_hold_frames: 240
+  critical_plus_delta_c: 3.0
+  critical_max_delta_c: 7.0
+  pressure_hysteresis_c: 2.0
+  pressure_hold_frames: 120
 
 scene:
   light_edge_density_max: 0.08
@@ -243,10 +253,20 @@ runtime:
   default_input_resolution: 480
   default_inference_interval: 2
   default_cpu_threads: 3
+  metrics_window_frames: 180
 
 thermal:
-  normal_max_c: 60.0
-  warm_max_c: 72.0
+  normal_max_c: 58.0
+  warm_max_c: 66.0
+  critical_c: 76.0
+  hysteresis_c: 5.0
+  warm_hold_frames: 180
+  hot_hold_frames: 300
+  critical_hold_frames: 450
+  critical_plus_delta_c: 2.0
+  critical_max_delta_c: 5.0
+  pressure_hysteresis_c: 2.0
+  pressure_hold_frames: 180
 
 inference:
   model_path: models/rtdetr_r18_lite_pi4.onnx
@@ -255,9 +275,10 @@ inference:
 This means:
 
 ```text
-normal: temp < 60°C
-warm:   60°C <= temp < 72°C
-hot:    temp >= 72°C
+normal:   temp < 58°C
+warm:     58°C <= temp < 66°C
+hot:      66°C <= temp < 76°C
+critical: temp >= 76°C
 ```
 
 The default runtime action under this config is:
@@ -346,7 +367,7 @@ python scripts/run_experiment.py \
 | Strategy                   | Uses Scene | Uses Thermal | Fixed Interval | Fixed Resolution | Fixed Threads | CPU Affinity | Governor    | Main Purpose                              |
 | -------------------------- | ---------: | -----------: | -------------: | ---------------: | ------------: | ------------ | ----------- | ----------------------------------------- |
 | `native_rtdetr`            |         No |           No |              1 |              640 |             4 | null         | performance | Native high-performance RT-DETR baseline  |
-| `default`                  |        Yes |          Yes |           null |             null |          null | null         | null        | Balanced adaptive policy placeholder      |
+| `default`                  |        Yes |          Yes |           null |             null |          null | null         | null        | Balanced adaptive policy using current controller |
 | `static_affinity`          |         No |           No |              1 |              640 |             3 | `[0,1,2]`    | performance | Fixed runtime with CPU affinity           |
 | `fixed_low_power`          |         No |           No |              4 |              320 |             2 | `[0,1]`      | powersave   | Static low-power baseline                 |
 | `fixed_frame_skip`         |         No |           No |              3 |              480 |             4 | null         | null        | Static frame-skipping baseline            |
@@ -438,8 +459,9 @@ Behavior:
 Current important note:
 
 ```text
-At the current repository state, the adaptive rule table is still a placeholder.
-Therefore, this strategy currently behaves like a balanced default policy.
+The default strategy goes through the current adaptive controller.
+Thermal states can change the emitted action, but scene workload is still fixed to "medium"
+until SceneWorkloadEstimator.classify_workload() is implemented.
 ```
 
 With `configs/raspberry_pi4.yaml`, current default action is approximately:
@@ -657,8 +679,11 @@ Behavior:
 Current important note:
 
 ```text
-At the current repository state, the adaptive rule table is still a placeholder.
-Therefore, this strategy may currently return the balanced default action instead of a true temperature-dependent action.
+The thermal-only controller path is now substantially implemented.
+It includes normal/warm/hot/critical states, hysteresis, hold frames, and critical pressure levels.
+The most reliable runtime effect is frame skipping through inference_interval.
+CPU threads, governor, decoder_layers, and query_budget should still be treated as logged policy outputs
+unless their downstream enforcement has been separately verified.
 ```
 
 Expected future behavior:
@@ -767,12 +792,12 @@ Behavior:
 Current important note:
 
 ```text
-This is the intended final strategy, but two current placeholders limit it:
+This is the intended final strategy, but one core scene-side placeholder still limits it:
 
 1. SceneWorkloadEstimator.classify_workload() currently returns "medium".
-2. RuntimeDecisionController._rule_based_action() currently returns a balanced placeholder action.
 
-Therefore, this strategy currently runs through the full control pipeline, but its adaptive behavior is not fully implemented yet.
+Therefore, this strategy currently runs through the full control pipeline and can react to temperature,
+but it does not yet demonstrate true scene-complexity adaptation.
 ```
 
 Expected future behavior:
@@ -810,7 +835,7 @@ inference or skip
 logging
 ```
 
-However, the adaptive policy itself is not fully implemented yet.
+However, the full scene-thermal policy is not fully implemented yet.
 
 ### 10.1 Workload classification limitation
 
@@ -826,19 +851,24 @@ Effect:
 scene_only and scene_thermal_coadaptive cannot yet fully reflect real scene complexity.
 ```
 
-### 10.2 Rule-based controller limitation
+### 10.2 Runtime knob enforcement limitation
 
 Current behavior:
 
 ```text
-RuntimeDecisionController._rule_based_action() returns a balanced placeholder action.
+RuntimeDecisionController now emits different actions for scene and thermal states,
+including warm/hot/critical thermal reductions.
 ```
 
 Effect:
 
 ```text
-thermal_only, scene_only, default, and scene_thermal_coadaptive currently use the adaptive pipeline,
-but they may not yet produce truly different actions for normal/warm/hot or light/medium/heavy states.
+The thermal-only path is meaningful for current experiments.
+However, the action fields do not all have equal downstream effect:
+inference_interval is enforced by the runtime loop;
+input_resolution depends on the ONNX input shape;
+cpu_threads, governor, decoder_layers, and query_budget are currently policy/log fields unless
+their OS-level or model-level enforcement has been implemented and verified.
 ```
 
 ### 10.3 Fixed strategies are reliable baselines
@@ -1022,6 +1052,37 @@ python scripts/run_experiment.py \
 
 ---
 
+## 13.5 Synthetic Thermal Test Logs
+
+Before running long Raspberry Pi experiments, generate synthetic thermal logs to test
+the analysis pipeline:
+
+```bash
+python scripts/generate_thermal_test_logs.py \
+  --output-dir experiments/logs/synthetic_thermal \
+  --duration-sec 900 \
+  --strategies native_rtdetr,fixed_frame_skip,fixed_low_power,thermal_only
+```
+
+Then summarize and plot one generated run:
+
+```bash
+python scripts/summarize_baseline.py \
+  --input experiments/logs/synthetic_thermal/synthetic_thermal_only.csv \
+  --output-dir experiments/results/synthetic_thermal \
+  --label synthetic_thermal_only
+
+python scripts/plot_results.py \
+  --input experiments/logs/synthetic_thermal/synthetic_thermal_only.csv \
+  --output-dir experiments/results/synthetic_thermal
+```
+
+These logs are synthetic and should not be reported as Raspberry Pi measurements.
+They are intended for validating CSV schema, thermal-state timelines, skip ratios,
+summary metrics, and plotting code.
+
+---
+
 ## 14. Running One Complete Experiment
 
 A complete experiment should run long enough to observe temperature rise and possible throttling behavior.
@@ -1107,6 +1168,30 @@ Reason:
 Start with safer low-power runs, then move to more thermally aggressive baselines.
 ```
 
+For the current thermal-aware milestone, the suite runner can run the most important
+thermal comparison and automatically summarize each run:
+
+```bash
+python scripts/run_thermal_experiment_suite.py \
+  --config configs/raspberry_pi4.yaml \
+  --video data/sample.mp4 \
+  --loop-video \
+  --duration-min 15 \
+  --cooldown-sec 120
+```
+
+Default suite strategies:
+
+```text
+native_rtdetr
+fixed_frame_skip
+fixed_low_power
+thermal_only
+```
+
+Use `--dry-run` for a quick pipeline check, or `--skip-plot` if pandas/matplotlib
+are not installed on the target device.
+
 ---
 
 ## 16. Plotting Results
@@ -1138,11 +1223,17 @@ summary plot:
 - inference latency
 - CPU temperature
 - scene workload
-- FPS
+- effective and actual inference FPS
 
 CPU frequency plot:
 - arm_clock_mhz if available
 - otherwise freq_mhz_avg
+
+thermal control plot:
+- temperature over all frames
+- raw/control thermal state
+- action_mode timeline
+- did_infer markers
 ```
 
 ---
@@ -1158,12 +1249,25 @@ timestamp
 frame_id
 strategy
 workload
+thermal_state
+raw_thermal_state
+control_thermal_state
+action_mode
 temp_c
 freq_mhz_avg
 arm_clock_mhz
 power_w
+throttling_raw
+under_voltage
+arm_freq_capped
+currently_throttled
+soft_temp_limit
+did_infer
 latency_ms
 fps
+loop_fps
+effective_inference_fps
+actual_inference_fps
 input_resolution
 inference_interval
 cpu_threads
@@ -1210,6 +1314,10 @@ median latency_ms
 max temperature
 mean temperature
 time above 80°C
+currently_throttled_ratio
+soft_temp_limit_ratio
+action_mode_counts
+thermal_state_counts
 arm_clock_mhz trend
 freq_mhz_avg trend
 detection_count
@@ -1427,7 +1535,7 @@ Reason:
 
 ```text
 These strategies use explicit fixed runtime values.
-They do not depend on placeholder adaptive rules.
+They do not depend on scene workload classification.
 ```
 
 After implementing true adaptive rules, the most important comparison becomes:
@@ -1482,16 +1590,19 @@ Before using adaptive results in the final report, implement:
 
 ```text
 1. SceneWorkloadEstimator.classify_workload()
-2. RuntimeDecisionController._rule_based_action()
-3. action_mode logging
-4. optional thermal_state logging
-5. optional throttling flag logging
+2. Verify input_resolution actually changes ONNX input size, or export multiple fixed-resolution ONNX models.
+3. Make cpu_threads real through ONNX Runtime SessionOptions or document it as a fixed experiment setting.
+4. Add optional OS-level governor/affinity application with verification.
+5. Decide whether decoder_layers/query_budget are future work or real exported model variants.
+6. Add optional throttling flag logging if available on the target Pi.
 ```
 
-The most important missing log field is:
+The most important switching log fields are already present:
 
 ```text
+thermal_state
 action_mode
+did_infer
 ```
 
 Reason:
@@ -1508,7 +1619,7 @@ strategy = scene_thermal_coadaptive
 action_mode = hot_cooldown
 ```
 
-This is essential for proving that runtime switching actually happened.
+These fields are essential for proving that runtime switching and frame skipping actually happened.
 
 ---
 
@@ -1556,7 +1667,6 @@ Check whether:
 
 ```text
 classify_workload() is still returning medium
-_rule_based_action() is still returning balanced_placeholder
 input_resolution is overridden by fixed ONNX shape
 cpu_threads/governor are only logged but not applied
 ```
@@ -1661,11 +1771,10 @@ scene_only
 scene_thermal_coadaptive
 ```
 
-However, the adaptive strategies still depend on unfinished placeholder logic in:
+However, full scene-aware adaptation still depends on unfinished logic in:
 
 ```text
 SceneWorkloadEstimator.classify_workload()
-RuntimeDecisionController._rule_based_action()
 ```
 
-Therefore, for immediate experiments, use fixed strategies to establish baselines. For the final project contribution, implement the missing adaptive logic and then compare `scene_thermal_coadaptive` against the fixed baselines.
+Therefore, for immediate experiments, use fixed strategies plus `thermal_only` to establish baselines and validate temperature control. For the final project contribution, implement scene workload classification, verify which runtime knobs are truly enforced, and then compare `scene_thermal_coadaptive` against the fixed and thermal-only baselines.

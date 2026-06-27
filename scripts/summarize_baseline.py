@@ -9,6 +9,7 @@ import json
 import math
 from pathlib import Path
 from statistics import mean, median
+from collections import Counter
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,6 +42,46 @@ def _series(rows: list[dict[str, str]], column: str) -> list[float]:
         if value is not None:
             values.append(value)
     return values
+
+
+def _to_bool(value: str | None) -> bool | None:
+    if value is None or value == "":
+        return None
+    lowered = value.strip().lower()
+    if lowered in {"true", "1", "yes"}:
+        return True
+    if lowered in {"false", "0", "no"}:
+        return False
+    return None
+
+
+def _bool_ratio(rows: list[dict[str, str]], column: str) -> float | None:
+    values = [_to_bool(row.get(column)) for row in rows]
+    values = [value for value in values if value is not None]
+    if not values:
+        return None
+    return sum(1 for value in values if value) / len(values)
+
+
+def _time_above(rows: list[dict[str, str]], column: str, threshold: float) -> float | None:
+    if len(rows) < 2:
+        return None
+    total = 0.0
+    for current, nxt in zip(rows, rows[1:]):
+        timestamp = _to_float(current.get("timestamp"))
+        next_timestamp = _to_float(nxt.get("timestamp"))
+        value = _to_float(current.get(column))
+        if timestamp is None or next_timestamp is None or value is None:
+            continue
+        dt = max(0.0, next_timestamp - timestamp)
+        if value >= threshold:
+            total += dt
+    return total
+
+
+def _counts_json(rows: list[dict[str, str]], column: str) -> str:
+    counts = Counter(row.get(column) or "unknown" for row in rows)
+    return json.dumps(dict(sorted(counts.items())), sort_keys=True)
 
 
 def _positive_series(rows: list[dict[str, str]], column: str) -> list[float]:
@@ -82,6 +123,7 @@ def summarize(rows: list[dict[str, str]], label: str) -> dict[str, float | int |
     fps = _series(rows, "fps")
     loop_fps = _series(rows, "loop_fps") or fps
     effective_inference_fps = _series(rows, "effective_inference_fps")
+    actual_inference_fps = _series(rows, "actual_inference_fps")
     temps = _series(rows, "temp_c")
     freqs = _series(rows, "freq_mhz_avg")
     arm_clocks = _series(rows, "arm_clock_mhz")
@@ -95,6 +137,7 @@ def summarize(rows: list[dict[str, str]], label: str) -> dict[str, float | int |
         "total_frames": len(rows),
         "inference_frames": len(latencies),
         "skipped_frames": len(rows) - len(latencies),
+        "skip_ratio": ((len(rows) - len(latencies)) / len(rows)) if rows else None,
         "latency_ms_mean": _stat(latencies, "mean"),
         "latency_ms_median": _stat(latencies, "median"),
         "latency_ms_p95": _percentile(latencies, 0.95),
@@ -109,10 +152,25 @@ def summarize(rows: list[dict[str, str]], label: str) -> dict[str, float | int |
         "effective_inference_fps_median": _stat(effective_inference_fps, "median"),
         "effective_inference_fps_min": _stat(effective_inference_fps, "min"),
         "effective_inference_fps_max": _stat(effective_inference_fps, "max"),
+        "actual_inference_fps_mean": _stat(actual_inference_fps, "mean"),
+        "actual_inference_fps_median": _stat(actual_inference_fps, "median"),
+        "actual_inference_fps_min": _stat(actual_inference_fps, "min"),
+        "actual_inference_fps_max": _stat(actual_inference_fps, "max"),
         "temp_c_start": temps[0] if temps else None,
         "temp_c_end": temps[-1] if temps else None,
         "temp_c_mean": _stat(temps, "mean"),
         "temp_c_max": _stat(temps, "max"),
+        "time_above_70c_sec": _time_above(rows, "temp_c", 70.0),
+        "time_above_75c_sec": _time_above(rows, "temp_c", 75.0),
+        "time_above_80c_sec": _time_above(rows, "temp_c", 80.0),
+        "currently_throttled_ratio": _bool_ratio(rows, "currently_throttled"),
+        "soft_temp_limit_ratio": _bool_ratio(rows, "soft_temp_limit"),
+        "arm_freq_capped_ratio": _bool_ratio(rows, "arm_freq_capped"),
+        "under_voltage_ratio": _bool_ratio(rows, "under_voltage"),
+        "thermal_state_counts": _counts_json(rows, "thermal_state"),
+        "raw_thermal_state_counts": _counts_json(rows, "raw_thermal_state"),
+        "control_thermal_state_counts": _counts_json(rows, "control_thermal_state"),
+        "action_mode_counts": _counts_json(rows, "action_mode"),
         "freq_mhz_avg_mean": _stat(freqs, "mean"),
         "arm_clock_mhz_mean": _stat(arm_clocks, "mean"),
         "arm_clock_mhz_min": _stat(arm_clocks, "min"),

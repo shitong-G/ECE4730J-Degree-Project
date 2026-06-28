@@ -48,6 +48,18 @@ def _load_frames(video: Path, count: int) -> list:
         source.release()
 
 
+def _resolved_resolution(engine: ONNXRTDETREngine, requested: int) -> int:
+    """Resolve actual ONNX input size across old and new engine versions."""
+    value = getattr(engine, "last_resolved_input_resolution", None)
+    if value is not None:
+        return int(value)
+    resolver = getattr(engine, "_resolve_input_resolution", None)
+    if callable(resolver):
+        return int(resolver(int(requested)))
+    fixed = getattr(engine, "_fixed_input_size", None)
+    return int(fixed or requested)
+
+
 def main() -> None:
     args = parse_args()
     resolutions = _parse_ints(args.resolutions)
@@ -91,7 +103,7 @@ def main() -> None:
                     "governor": governor,
                     "threads": threads,
                     "requested_resolution": resolution,
-                    "resolved_resolution": engine.last_resolved_input_resolution,
+                    "resolved_resolution": _resolved_resolution(engine, resolution),
                     "governor_applied": applied.governor_applied,
                     "governor_apply_error": applied.governor_apply_error,
                     "mean_total_ms": sum(latencies) / len(latencies),

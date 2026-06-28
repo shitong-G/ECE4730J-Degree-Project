@@ -61,17 +61,30 @@ def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, flo
     return inter / denom if denom > 0 else 0.0
 
 
+def _normalize_bbox(
+    bbox: tuple[float, float, float, float],
+    resolution: int,
+) -> tuple[float, float, float, float]:
+    scale = float(resolution)
+    x1, y1, x2, y2 = bbox
+    return (x1 / scale, y1 / scale, x2 / scale, y2 / scale)
+
+
 def _match(
     teacher: list[Detection],
     student: list[Detection],
+    teacher_resolution: int,
+    student_resolution: int,
     iou_threshold: float,
 ) -> list[tuple[int, int, float]]:
     candidates: list[tuple[float, int, int]] = []
     for ti, td in enumerate(teacher):
+        teacher_box = _normalize_bbox(td.bbox, teacher_resolution)
         for si, sd in enumerate(student):
             if td.class_id != sd.class_id:
                 continue
-            iou = _iou(td.bbox, sd.bbox)
+            student_box = _normalize_bbox(sd.bbox, student_resolution)
+            iou = _iou(teacher_box, student_box)
             if iou >= iou_threshold:
                 candidates.append((iou, ti, si))
 
@@ -169,6 +182,7 @@ def main() -> None:
         {
             "resolution": args.teacher_resolution,
             "role": "teacher",
+            "iou_space": "normalized_input",
             "frames": len(frames),
             "mean_latency_ms": _safe_mean(teacher_latency),
             "mean_detection_count": _safe_mean([float(v) for v in teacher_counts]),
@@ -200,7 +214,13 @@ def main() -> None:
         for frame_id, _ in frames:
             teacher = teacher_dets[frame_id]
             student = student_dets[frame_id]
-            matches = _match(teacher, student, args.iou_threshold)
+            matches = _match(
+                teacher,
+                student,
+                args.teacher_resolution,
+                resolution,
+                args.iou_threshold,
+            )
             total_teacher += len(teacher)
             total_student += len(student)
             total_matches += len(matches)
@@ -211,6 +231,7 @@ def main() -> None:
                 {
                     "frame_id": frame_id,
                     "student_resolution": resolution,
+                    "iou_space": "normalized_input",
                     "teacher_count": len(teacher),
                     "student_count": len(student),
                     "matches": len(matches),
@@ -224,6 +245,7 @@ def main() -> None:
             {
                 "resolution": resolution,
                 "role": "student",
+                "iou_space": "normalized_input",
                 "frames": len(frames),
                 "mean_latency_ms": _safe_mean(list(student_lat.values())),
                 "mean_detection_count": _safe_mean(
@@ -249,6 +271,7 @@ def main() -> None:
         fieldnames = [
             "frame_id",
             "student_resolution",
+            "iou_space",
             "teacher_count",
             "student_count",
             "matches",

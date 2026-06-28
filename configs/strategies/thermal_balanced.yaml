@@ -1,6 +1,6 @@
 strategy:
   name: thermal_balanced
-  description: Performance-first thermal-aware policy that spends thermal budget to maximize sustained inference FPS
+  description: Quality-first thermal-aware policy that preserves 640 input until thermal pressure requires lower-resolution routing
 
 policy:
   use_scene: false
@@ -13,21 +13,21 @@ policy:
   fixed_governor: null
 
 runtime:
-  default_input_resolution: 480
+  default_input_resolution: 640
   default_inference_interval: 1
   default_cpu_threads: 4
 
 thermal:
-  normal_max_c: 76.0
-  warm_max_c: 80.0
-  critical_c: 86.0
+  normal_max_c: 80.0
+  warm_max_c: 84.0
+  critical_c: 87.0
   hysteresis_c: 2.5
-  warm_hold_frames: 20
-  hot_hold_frames: 30
-  critical_hold_frames: 60
-  warm_hold_sec: 5.0
-  hot_hold_sec: 8.0
-  critical_hold_sec: 12.0
+  warm_hold_frames: 12
+  hot_hold_frames: 20
+  critical_hold_frames: 45
+  warm_hold_sec: 3.0
+  hot_hold_sec: 6.0
+  critical_hold_sec: 10.0
   critical_plus_delta_c: 1.5
   critical_max_delta_c: 3.0
   pressure_hysteresis_c: 1.0
@@ -36,7 +36,11 @@ thermal:
   target_c: 84.0
   recovery_slope_c_per_min: -0.05
   preemptive_slope_c_per_min: 0.8
-  balanced_interval_cap: 5
+  use_throttling_pressure: true
+  soft_temp_limit_state: hot
+  currently_throttled_state: critical
+  arm_freq_capped_state: critical
+  balanced_interval_cap: 4
   balanced_normal_governor: performance
   balanced_warm_resolution_steps: 0
   balanced_warm_near_hot_resolution_extra_steps: 0
@@ -44,21 +48,21 @@ thermal:
   balanced_warm_near_hot_interval_extra_boost: 0
   balanced_warm_thread_cap: 4
   balanced_warm_governor: performance
-  balanced_hot_resolution_steps: 0
-  balanced_hot_interval_boost: 1
-  balanced_hot_interval_min: 2
+  balanced_hot_resolution_steps: 1
+  balanced_hot_interval_boost: 0
+  balanced_hot_interval_min: 1
   balanced_hot_thread_cap: 4
   balanced_hot_query_budget: 180
-  balanced_hot_plus_resolution_steps: 0
+  balanced_hot_plus_resolution_steps: 1
   balanced_hot_plus_interval_boost: 1
   balanced_hot_plus_interval_min: 2
   balanced_hot_plus_thread_cap: 4
   balanced_hot_plus_query_budget: 150
   balanced_hot_governor: performance
   balanced_hot_plus_governor: performance
-  balanced_critical_resolution_steps: 1
-  balanced_critical_interval_boost: 2
-  balanced_critical_interval_min: 3
-  balanced_critical_thread_cap: 3
+  balanced_critical_resolution_steps: 2
+  balanced_critical_interval_boost: 1
+  balanced_critical_interval_min: 2
+  balanced_critical_thread_cap: 4
   balanced_critical_query_budget: 100
-  balanced_critical_governor: ondemand
+  balanced_critical_governor: performance

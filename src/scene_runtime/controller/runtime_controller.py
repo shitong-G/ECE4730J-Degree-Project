@@ -63,6 +63,18 @@ class RuntimeDecisionController:
         self._preemptive_slope_c_per_min = float(
             thermal.get("preemptive_slope_c_per_min", 0.4)
         )
+        self._use_throttling_pressure = bool(
+            thermal.get("use_throttling_pressure", True)
+        )
+        self._soft_temp_limit_state = str(
+            thermal.get("soft_temp_limit_state", "hot")
+        )
+        self._currently_throttled_state = str(
+            thermal.get("currently_throttled_state", "critical")
+        )
+        self._arm_freq_capped_state = str(
+            thermal.get("arm_freq_capped_state", "critical")
+        )
         self._balanced_interval_cap = int(thermal.get("balanced_interval_cap", 12))
         self._balanced_normal_governor = str(
             thermal.get("balanced_normal_governor", "ondemand")
@@ -224,6 +236,10 @@ class RuntimeDecisionController:
         self._update_temp_slope(device_state.get("temp_c"))
         runtime_state = self.classify_runtime_state(scene_state, device_state)
         thermal_state = runtime_state["thermal_state"]
+        thermal_state = self._thermal_state_with_throttling_pressure(
+            thermal_state,
+            device_state.get("throttling") or {},
+        )
         if self._config.get("policy", {}).get("use_thermal", True):
             thermal_state = self._guarded_thermal_state(
                 thermal_state,
@@ -515,19 +531,44 @@ class RuntimeDecisionController:
         except (TypeError, ValueError):
             return raw_state if raw_state in THERMAL_LEVELS else "unknown"
 
+        raw_level = THERMAL_LEVELS.get(raw_state, THERMAL_LEVELS["normal"])
         if temp >= self._critical_c:
-            return "critical"
-        if temp >= self._warm_max_c:
-            return "hot"
-        if temp >= self._normal_max_c:
-            return "warm"
+            desired = "critical"
+        elif temp >= self._warm_max_c:
+            desired = "hot"
+        elif temp >= self._normal_max_c:
+            desired = "warm"
+        else:
+            desired = "normal"
         if (
             temp >= self._normal_max_c - 2.0
             and self._last_temp_slope_c_per_min >= self._preemptive_slope_c_per_min
         ):
             self._last_decision_reason = "preemptive_warm_slope"
-            return "warm"
-        return "normal"
+            desired = "warm"
+        desired_level = max(raw_level, THERMAL_LEVELS[desired])
+        return THERMAL_NAMES[desired_level]
+
+    def _thermal_state_with_throttling_pressure(
+        self,
+        thermal_state: str,
+        throttling: dict[str, Any],
+    ) -> str:
+        """Elevate thermal state from firmware throttling flags when enabled."""
+        if not self._use_throttling_pressure:
+            return thermal_state
+
+        level = THERMAL_LEVELS.get(thermal_state, THERMAL_LEVELS["normal"])
+        if throttling.get("currently_throttled"):
+            level = max(
+                level,
+                THERMAL_LEVELS.get(self._currently_throttled_state, level),
+            )
+        if throttling.get("arm_freq_capped"):
+            level = max(level, THERMAL_LEVELS.get(self._arm_freq_capped_state, level))
+        if throttling.get("soft_temp_limit"):
+            level = max(level, THERMAL_LEVELS.get(self._soft_temp_limit_state, level))
+        return THERMAL_NAMES[level]
 
     def _can_cool_down_one_level(self, temp_c: Any) -> bool:
         try:

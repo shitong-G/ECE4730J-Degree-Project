@@ -177,6 +177,8 @@ def summarize(rows: list[dict[str, str]], label: str) -> dict[str, float | int |
         "action_mode_counts": _counts_json(rows, "action_mode"),
         "decision_reason_counts": _counts_json(rows, "decision_reason"),
         "thermal_pressure_level_counts": _counts_json(rows, "thermal_pressure_level"),
+        "input_resolution_counts": _counts_json(rows, "input_resolution"),
+        "resolved_input_resolution_counts": _counts_json(rows, "resolved_input_resolution"),
         "temp_slope_c_per_min_mean": _stat(_series(rows, "temp_slope_c_per_min"), "mean"),
         "freq_mhz_avg_mean": _stat(freqs, "mean"),
         "arm_clock_mhz_mean": _stat(arm_clocks, "mean"),

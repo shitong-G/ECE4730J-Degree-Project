@@ -41,6 +41,8 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         self._input_names: list[str] = []
         self._output_names: list[str] = []
         self._fixed_input_size: int | None = None
+        self._last_requested_input_resolution: int | None = None
+        self._last_resolved_input_resolution: int | None = None
 
         self._last_profile: dict[str, float] = {
             "preprocess_ms": 0.0,
@@ -54,6 +56,16 @@ class ONNXRTDETREngine(BaseInferenceEngine):
     def last_profile(self) -> dict[str, float]:
         """Return timing profile from the most recent infer() call."""
         return dict(self._last_profile)
+
+    @property
+    def last_requested_input_resolution(self) -> int | None:
+        """Return the latest action-requested image resolution."""
+        return self._last_requested_input_resolution
+
+    @property
+    def last_resolved_input_resolution(self) -> int | None:
+        """Return the latest actual image resolution fed to ONNX."""
+        return self._last_resolved_input_resolution
         
     def load(self) -> None:
         """Load ONNX session or no-op in dry-run mode."""
@@ -180,7 +192,9 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         if self._session is None:
             raise RuntimeError("Engine not loaded. Call load() first.")
     
+        self._last_requested_input_resolution = int(config.input_resolution)
         input_resolution = self._resolve_input_resolution(config.input_resolution)
+        self._last_resolved_input_resolution = int(input_resolution)
     
         t0 = time.perf_counter()
         blob = self.preprocess(frame, input_resolution)

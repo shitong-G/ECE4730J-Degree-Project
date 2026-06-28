@@ -64,14 +64,23 @@ class RuntimeDecisionController:
             thermal.get("preemptive_slope_c_per_min", 0.4)
         )
         self._balanced_interval_cap = int(thermal.get("balanced_interval_cap", 12))
+        self._balanced_normal_governor = str(
+            thermal.get("balanced_normal_governor", "ondemand")
+        )
         self._balanced_warm_resolution_steps = int(
             thermal.get("balanced_warm_resolution_steps", 0)
+        )
+        self._balanced_warm_near_hot_resolution_extra_steps = int(
+            thermal.get("balanced_warm_near_hot_resolution_extra_steps", 0)
         )
         self._balanced_warm_interval_boost = int(
             thermal.get("balanced_warm_interval_boost", 0)
         )
         self._balanced_warm_thread_cap = int(
             thermal.get("balanced_warm_thread_cap", self._default_threads)
+        )
+        self._balanced_warm_governor = str(
+            thermal.get("balanced_warm_governor", self._balanced_normal_governor)
         )
         self._balanced_hot_resolution_steps = int(
             thermal.get("balanced_hot_resolution_steps", 1)
@@ -106,6 +115,24 @@ class RuntimeDecisionController:
         self._balanced_hot_governor = str(thermal.get("balanced_hot_governor", "ondemand"))
         self._balanced_hot_plus_governor = str(
             thermal.get("balanced_hot_plus_governor", "powersave")
+        )
+        self._balanced_critical_resolution_steps = int(
+            thermal.get("balanced_critical_resolution_steps", 2)
+        )
+        self._balanced_critical_interval_boost = int(
+            thermal.get("balanced_critical_interval_boost", 3)
+        )
+        self._balanced_critical_interval_min = int(
+            thermal.get("balanced_critical_interval_min", max(self._default_interval + 3, 4))
+        )
+        self._balanced_critical_thread_cap = int(
+            thermal.get("balanced_critical_thread_cap", 2)
+        )
+        self._balanced_critical_query_budget = int(
+            thermal.get("balanced_critical_query_budget", 100)
+        )
+        self._balanced_critical_governor = str(
+            thermal.get("balanced_critical_governor", "powersave")
         )
         self._thermal_guard_state = "normal"
         self._thermal_hold_remaining = 0
@@ -240,7 +267,7 @@ class RuntimeDecisionController:
             input_resolution=self._default_res,
             inference_interval=self._default_interval,
             cpu_threads=self._default_threads,
-            governor="ondemand",
+            governor=self._balanced_normal_governor,
             decoder_layers=None,
             query_budget=200,
         )
@@ -316,20 +343,22 @@ class RuntimeDecisionController:
 
         critical_level = self._guarded_critical_pressure_level(temp_c)
         if self._is_balanced_thermal_policy():
+            mode = f"{action.mode}_thermal_critical_balanced"
+            interval = max(
+                action.inference_interval + self._balanced_critical_interval_boost,
+                self._balanced_critical_interval_min,
+            )
+            query_budget = self._balanced_critical_query_budget
             if critical_level >= 2:
-                mode = f"{action.mode}_thermal_critical_max"
-                interval = max(action.inference_interval + 8, 10)
-                query_budget = 50
+                mode = f"{action.mode}_thermal_critical_max_balanced"
+                interval += 2
+                query_budget = min(query_budget, 70)
             elif critical_level == 1:
-                mode = f"{action.mode}_thermal_critical_plus"
-                interval = max(action.inference_interval + 6, 8)
-                query_budget = 60
-            else:
-                mode = f"{action.mode}_thermal_critical"
-                interval = max(action.inference_interval + 4, 6)
-                query_budget = 80
+                mode = f"{action.mode}_thermal_critical_plus_balanced"
+                interval += 1
+                query_budget = min(query_budget, 85)
             if self._is_cooling_fast_enough(temp_c):
-                interval = max(4, interval - 2)
+                interval = max(self._balanced_hot_plus_interval_min, interval - 1)
                 mode = f"{mode}_recovery"
                 self._last_decision_reason = "critical_recovery"
             else:
@@ -352,17 +381,34 @@ class RuntimeDecisionController:
 
         return RuntimeAction(
             mode=mode,
-            input_resolution=320,
+            input_resolution=(
+                self._lower_resolution(
+                    action.input_resolution,
+                    steps=self._balanced_critical_resolution_steps,
+                )
+                if self._is_balanced_thermal_policy()
+                else 320
+            ),
             inference_interval=self._cap_interval(interval),
-            cpu_threads=1,
-            governor="powersave",
+            cpu_threads=(
+                max(1, min(action.cpu_threads, self._balanced_critical_thread_cap))
+                if self._is_balanced_thermal_policy()
+                else 1
+            ),
+            governor=(
+                self._balanced_critical_governor
+                if self._is_balanced_thermal_policy()
+                else "powersave"
+            ),
             decoder_layers=2,
             query_budget=query_budget,
         )
 
     def _balanced_warm_action(self, action: RuntimeAction, temp_c: Any) -> RuntimeAction:
         near_hot = self._temp_at_least(temp_c, self._warm_max_c - 2.0)
-        steps = self._balanced_warm_resolution_steps + (1 if near_hot else 0)
+        steps = self._balanced_warm_resolution_steps + (
+            self._balanced_warm_near_hot_resolution_extra_steps if near_hot else 0
+        )
         interval_boost = self._balanced_warm_interval_boost + (1 if near_hot else 0)
         self._last_decision_reason = (
             "balanced_warm_near_hot" if near_hot else "balanced_warm_hold"
@@ -374,7 +420,7 @@ class RuntimeDecisionController:
                 max(action.inference_interval + interval_boost, self._default_interval)
             ),
             cpu_threads=max(1, min(action.cpu_threads, self._balanced_warm_thread_cap)),
-            governor="ondemand",
+            governor=self._balanced_warm_governor,
             decoder_layers=self._min_optional(action.decoder_layers, 5),
             query_budget=self._min_optional(action.query_budget, 180 if near_hot else 200),
         )

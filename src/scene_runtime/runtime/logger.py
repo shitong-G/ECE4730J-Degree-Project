@@ -36,6 +36,7 @@ LOG_COLUMNS = [
     "effective_inference_fps",
     "actual_inference_fps",
     "input_resolution",
+    "resolved_input_resolution",
     "inference_interval",
     "cpu_threads",
     "governor",
@@ -85,6 +86,7 @@ class LogRecord:
     effective_inference_fps: float
     actual_inference_fps: float
     input_resolution: int
+    resolved_input_resolution: int | None
     inference_interval: int
     cpu_threads: int
     governor: str | None

@@ -280,6 +280,7 @@ class RuntimeLoop:
             effective_inference_fps=effective_inference_fps,
             actual_inference_fps=actual_inference_fps,
             input_resolution=action.input_resolution,
+            resolved_input_resolution=self._engine.last_resolved_input_resolution,
             inference_interval=action.inference_interval,
             cpu_threads=action.cpu_threads,
             governor=action.governor,

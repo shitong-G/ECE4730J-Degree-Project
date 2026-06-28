@@ -42,9 +42,11 @@ LOG_COLUMNS = [
     "requested_governor",
     "applied_governor",
     "governor_applied",
+    "governor_apply_error",
     "requested_cpu_affinity",
     "applied_cpu_affinity",
     "cpu_affinity_applied",
+    "cpu_affinity_apply_error",
     "decoder_layers",
     "query_budget",
     "detection_count",
@@ -89,9 +91,11 @@ class LogRecord:
     requested_governor: str | None
     applied_governor: str | None
     governor_applied: bool | None
+    governor_apply_error: str | None
     requested_cpu_affinity: str | None
     applied_cpu_affinity: str | None
     cpu_affinity_applied: bool | None
+    cpu_affinity_apply_error: str | None
     decoder_layers: int | None
     query_budget: int | None
     detection_count: int

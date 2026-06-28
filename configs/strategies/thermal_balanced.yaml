@@ -11,3 +11,29 @@ policy:
   fixed_cpu_threads: null
   fixed_cpu_affinity: null
   fixed_governor: null
+
+thermal:
+  warm_hold_frames: 60
+  hot_hold_frames: 90
+  critical_hold_frames: 240
+  warm_hold_sec: 12.0
+  hot_hold_sec: 18.0
+  critical_hold_sec: 45.0
+  target_c: 74.0
+  recovery_slope_c_per_min: -0.05
+  balanced_interval_cap: 8
+  balanced_warm_resolution_steps: 0
+  balanced_warm_interval_boost: 0
+  balanced_warm_thread_cap: 3
+  balanced_hot_resolution_steps: 0
+  balanced_hot_interval_boost: 1
+  balanced_hot_interval_min: 3
+  balanced_hot_thread_cap: 3
+  balanced_hot_query_budget: 160
+  balanced_hot_plus_resolution_steps: 1
+  balanced_hot_plus_interval_boost: 2
+  balanced_hot_plus_interval_min: 4
+  balanced_hot_plus_thread_cap: 2
+  balanced_hot_plus_query_budget: 120
+  balanced_hot_governor: ondemand
+  balanced_hot_plus_governor: powersave

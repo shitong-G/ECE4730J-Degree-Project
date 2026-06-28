@@ -133,11 +133,27 @@ def run_cmd(cmd: list[str]) -> None:
     subprocess.run(cmd, cwd=ROOT, check=True)
 
 
+def print_runtime_action_probe(enabled: bool) -> None:
+    """Print OS runtime-action capability once before the suite."""
+    if not enabled:
+        return
+    cmd = [
+        sys.executable,
+        str(ROOT / "scripts" / "check_runtime_action_support.py"),
+    ]
+    print("Runtime action support probe:", flush=True)
+    try:
+        run_cmd(cmd)
+    except subprocess.CalledProcessError as exc:
+        print(f"Runtime action support probe failed: {exc}", file=sys.stderr)
+
+
 def main() -> None:
     args = parse_args()
     strategies = [item.strip() for item in args.strategies.split(",") if item.strip()]
     args.log_dir.mkdir(parents=True, exist_ok=True)
     args.result_dir.mkdir(parents=True, exist_ok=True)
+    print_runtime_action_probe(args.apply_runtime_actions)
 
     logs: list[Path] = []
     run_number = 0

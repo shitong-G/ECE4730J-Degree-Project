@@ -76,6 +76,9 @@ class RuntimeDecisionController:
         self._balanced_warm_interval_boost = int(
             thermal.get("balanced_warm_interval_boost", 0)
         )
+        self._balanced_warm_near_hot_interval_extra_boost = int(
+            thermal.get("balanced_warm_near_hot_interval_extra_boost", 0)
+        )
         self._balanced_warm_thread_cap = int(
             thermal.get("balanced_warm_thread_cap", self._default_threads)
         )
@@ -409,7 +412,9 @@ class RuntimeDecisionController:
         steps = self._balanced_warm_resolution_steps + (
             self._balanced_warm_near_hot_resolution_extra_steps if near_hot else 0
         )
-        interval_boost = self._balanced_warm_interval_boost + (1 if near_hot else 0)
+        interval_boost = self._balanced_warm_interval_boost + (
+            self._balanced_warm_near_hot_interval_extra_boost if near_hot else 0
+        )
         self._last_decision_reason = (
             "balanced_warm_near_hot" if near_hot else "balanced_warm_hold"
         )

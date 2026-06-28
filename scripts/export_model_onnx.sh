@@ -6,6 +6,7 @@
 # Usage:
 #   bash scripts/export_model_onnx.sh              # lite (default)
 #   bash scripts/export_model_onnx.sh lite
+#   bash scripts/export_model_onnx.sh lite 480
 #   bash scripts/export_model_onnx.sh rtdetrv2-s   # RT-DETRv2-S (full sp4)
 #   bash scripts/export_model_onnx.sh v1           # legacy RT-DETR v1 R18
 #
@@ -17,6 +18,13 @@ RTDETR="${ROOT}/third_party/RT-DETR"
 OUT_DIR="${ROOT}/models"
 CKPT_DIR="${ROOT}/third_party/checkpoints"
 VARIANT="${1:-lite}"
+INPUT_SIZE="${2:-640}"
+
+if ! [[ "$INPUT_SIZE" =~ ^[0-9]+$ ]]; then
+  echo "Invalid input size: $INPUT_SIZE"
+  echo "Usage: bash scripts/export_model_onnx.sh [lite|rtdetrv2-s|v1] [input_size]"
+  exit 1
+fi
 
 if [ ! -d "$RTDETR" ]; then
   echo "RT-DETR not found. Run: bash scripts/clone_rtdetr.sh"
@@ -31,7 +39,7 @@ case "$VARIANT" in
     CONFIG="configs/rtdetrv2/rtdetrv2_r18vd_sp1_120e_coco.yml"
     CKPT_URL="https://github.com/lyuwenyu/storage/releases/download/v0.1/rtdetrv2_r18vd_sp1_120e_coco.pth"
     CKPT_FILE="${CKPT_DIR}/rtdetrv2_r18vd_sp1_120e_coco.pth"
-    OUT_FILE="${OUT_DIR}/rtdetr_r18_lite_pi4.onnx"
+    OUT_FILE="${OUT_DIR}/rtdetr_r18_lite_pi4_${INPUT_SIZE}.onnx"
     LABEL="RT-DETRv2 R18 lite (sp1)"
     ;;
   s|rtdetrv2-s|r18)
@@ -39,7 +47,7 @@ case "$VARIANT" in
     CONFIG="configs/rtdetrv2/rtdetrv2_r18vd_120e_coco.yml"
     CKPT_URL="https://github.com/lyuwenyu/storage/releases/download/v0.2/rtdetrv2_r18vd_120e_coco_rerun_48.1.pth"
     CKPT_FILE="${CKPT_DIR}/rtdetrv2_r18vd_120e_coco_rerun_48.1.pth"
-    OUT_FILE="${OUT_DIR}/rtdetr_r18_pi4.onnx"
+    OUT_FILE="${OUT_DIR}/rtdetr_r18_pi4_${INPUT_SIZE}.onnx"
     LABEL="RT-DETRv2-S (R18)"
     ;;
   v1|rtdetr-v1)
@@ -47,7 +55,7 @@ case "$VARIANT" in
     CONFIG="configs/rtdetr/rtdetr_r18vd_6x_coco.yml"
     CKPT_URL="https://github.com/lyuwenyu/storage/releases/download/v0.1/rtdetr_r18vd_dec3_6x_coco_from_paddle.pth"
     CKPT_FILE="${CKPT_DIR}/rtdetr_r18vd_dec3_6x_coco_from_paddle.pth"
-    OUT_FILE="${OUT_DIR}/rtdetr_r18_pi4.onnx"
+    OUT_FILE="${OUT_DIR}/rtdetr_r18_pi4_v1_${INPUT_SIZE}.onnx"
     LABEL="RT-DETR v1 R18"
     ;;
   *)
@@ -97,11 +105,25 @@ fi
 echo "Exporting $LABEL -> $OUT_FILE"
 cd "$PYTORCH_DIR"
 
-python tools/export_onnx.py \
-  -c "$CONFIG" \
-  -r "$CKPT_FILE" \
-  -o "$OUT_FILE" \
-  --check
+if [[ "$PYTORCH_DIR" == *rtdetrv2_pytorch* ]]; then
+  python tools/export_onnx.py \
+    -c "$CONFIG" \
+    -r "$CKPT_FILE" \
+    -o "$OUT_FILE" \
+    -s "$INPUT_SIZE" \
+    -u "eval_spatial_size=[$INPUT_SIZE,$INPUT_SIZE]" \
+    --check
+else
+  if [ "$INPUT_SIZE" != "640" ]; then
+    echo "RT-DETR v1 exporter in this repo is hard-coded to 640; use lite/rtdetrv2-s for multi-resolution export."
+    exit 1
+  fi
+  python tools/export_onnx.py \
+    -c "$CONFIG" \
+    -r "$CKPT_FILE" \
+    -f "$OUT_FILE" \
+    --check
+fi
 
 echo ""
 echo "Done."

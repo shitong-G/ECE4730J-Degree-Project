@@ -33,7 +33,11 @@ thermal:
   balanced_interval_cap: 12
 
 inference:
-  model_path: models/rtdetr_r18_lite_pi4.onnx
+  model_path: models/rtdetr_r18_lite_pi4_640.onnx
+  model_paths_by_resolution:
+    320: models/rtdetr_r18_lite_pi4_320.onnx
+    480: models/rtdetr_r18_lite_pi4_480.onnx
+    640: models/rtdetr_r18_lite_pi4_640.onnx
   enable_thread_sessions: false
   thread_session_counts: [1, 2, 3, 4]
 

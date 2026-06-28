@@ -72,6 +72,7 @@ class RuntimeLoop:
         infer_cfg = config.get("inference", {})
         self._engine = ONNXRTDETREngine(
             model_path=infer_cfg.get("model_path"),
+            model_paths_by_resolution=infer_cfg.get("model_paths_by_resolution"),
             dry_run=dry_run,
             dry_run_latency_ms=float(runtime_cfg.get("dry_run_latency_ms", 45.0)),
             providers=infer_cfg.get("onnx_providers"),

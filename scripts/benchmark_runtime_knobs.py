@@ -21,6 +21,14 @@ from scene_runtime.utils.video import FrameSource
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark RT-DETR runtime knobs")
     parser.add_argument("--model", type=Path, default=ROOT / "models" / "rtdetr_r18_lite_pi4.onnx")
+    parser.add_argument(
+        "--model-template",
+        default=None,
+        help=(
+            "Optional path template with {resolution}, e.g. "
+            "models/rtdetr_r18_lite_pi4_{resolution}.onnx"
+        ),
+    )
     parser.add_argument("--video", type=Path, default=ROOT / "data" / "sample.mp4")
     parser.add_argument("--frames", type=int, default=8)
     parser.add_argument("--warmup", type=int, default=1)
@@ -66,9 +74,16 @@ def main() -> None:
     thread_counts = _parse_ints(args.threads)
     governors = _parse_items(args.governors)
     frames = _load_frames(args.video, max(1, args.frames + args.warmup))
+    model_paths_by_resolution = None
+    if args.model_template:
+        model_paths_by_resolution = {
+            resolution: args.model_template.format(resolution=resolution)
+            for resolution in resolutions
+        }
 
     engine = ONNXRTDETREngine(
         model_path=str(args.model),
+        model_paths_by_resolution=model_paths_by_resolution,
         dry_run=False,
         enable_thread_sessions=True,
         thread_session_counts=thread_counts,

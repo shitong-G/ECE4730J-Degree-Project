@@ -948,6 +948,12 @@ def parse_classes(text: str) -> Optional[set[int]]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Event-triggered RT-DETR + LK tracking; outputs JPG frames.")
+    parser.add_argument(
+        "--mode",
+        choices=["detect_track", "detect_only"],
+        default="detect_track",
+        help="detect_track uses event-triggered RT-DETR + LK; detect_only runs RT-DETR on every processed frame.",
+    )
     parser.add_argument("--video", type=Path, default=ROOT / "data" / "sample.mp4")
     parser.add_argument("--model", type=Path, default=ROOT / "models" / "rtdetr_r18_lite_pi4_640.onnx")
     parser.add_argument("--model-template", default=None, help="Optional model template containing {resolution}.")
@@ -998,21 +1004,23 @@ def main() -> None:
         score_threshold=args.score_threshold,
         allowed_classes=args.classes,
     )
-    tracker = LKMultiObjectTracker(
-        min_valid_points=args.min_valid_points,
-        max_failure_ratio=args.max_track_failure_ratio,
-        refresh_iou=args.refresh_iou,
-    )
-    gate = ResidualMotionGate(
-        gate_width=args.gate_width,
-        pixel_threshold=args.motion_threshold,
-        outside_ratio_threshold=args.outside_ratio_threshold,
-        min_component_area=args.min_component_area,
-        scene_change_ratio_threshold=args.scene_change_ratio_threshold,
-        mask_expand_ratio=args.mask_expand_ratio,
-        enable_camera_compensation=not args.disable_camera_compensation,
-    )
-    controller = DetectTrackController(detector, tracker, gate, args.safety_refresh_frames)
+    controller: DetectTrackController | None = None
+    if args.mode == "detect_track":
+        tracker = LKMultiObjectTracker(
+            min_valid_points=args.min_valid_points,
+            max_failure_ratio=args.max_track_failure_ratio,
+            refresh_iou=args.refresh_iou,
+        )
+        gate = ResidualMotionGate(
+            gate_width=args.gate_width,
+            pixel_threshold=args.motion_threshold,
+            outside_ratio_threshold=args.outside_ratio_threshold,
+            min_component_area=args.min_component_area,
+            scene_change_ratio_threshold=args.scene_change_ratio_threshold,
+            mask_expand_ratio=args.mask_expand_ratio,
+            enable_camera_compensation=not args.disable_camera_compensation,
+        )
+        controller = DetectTrackController(detector, tracker, gate, args.safety_refresh_frames)
 
     capture = cv2.VideoCapture(str(args.video))
     if not capture.isOpened():
@@ -1044,9 +1052,24 @@ def main() -> None:
                     source_frame_id += 1
                     continue
 
-                start = time.perf_counter()
-                detections, mode, reason, tracker_report, gate_report, detector_ms = controller.process(frame, source_frame_id)
-                total_ms = (time.perf_counter() - start) * 1000.0
+                if args.mode == "detect_only":
+                    start = time.perf_counter()
+                    detector_start = time.perf_counter()
+                    detections = detector.detect(frame)
+                    detector_ms = (time.perf_counter() - detector_start) * 1000.0
+                    total_ms = (time.perf_counter() - start) * 1000.0
+                    mode = "DETECT"
+                    reason = "detect_only"
+                    tracker_report = TrackerReport(0.0, 1.0, [], 0, 0)
+                    gate_report = GateReport(True, 0, 0.0, 0.0, 0)
+                    detector_call_count = detector_calls + 1
+                else:
+                    if controller is None:
+                        raise RuntimeError("detect_track controller was not initialized")
+                    start = time.perf_counter()
+                    detections, mode, reason, tracker_report, gate_report, detector_ms = controller.process(frame, source_frame_id)
+                    total_ms = (time.perf_counter() - start) * 1000.0
+                    detector_call_count = controller.detector_calls
                 total_latency_ms += total_ms
                 if mode == "DETECT":
                     detector_calls += 1
@@ -1058,7 +1081,7 @@ def main() -> None:
                     frame_id=source_frame_id,
                     mode=mode,
                     reason=reason,
-                    detector_calls=controller.detector_calls,
+                    detector_calls=detector_call_count,
                     total_latency_ms=total_ms,
                     detector_latency_ms=detector_ms,
                     tracker_report=tracker_report,
@@ -1074,7 +1097,7 @@ def main() -> None:
                     "mode": mode,
                     "reason": reason,
                     "objects": len(detections),
-                    "detector_calls": controller.detector_calls,
+                    "detector_calls": detector_call_count,
                     "total_latency_ms": f"{total_ms:.3f}",
                     "detector_latency_ms": f"{detector_ms:.3f}",
                     "tracker_failure_ratio": f"{tracker_report.failure_ratio:.6f}",
@@ -1110,6 +1133,7 @@ def main() -> None:
         "\n".join([
             f"video: {args.video}",
             f"model: {args.model}",
+            f"mode: {args.mode}",
             f"processed_visualized_frames: {processed}",
             f"detector_calls: {detector_calls}",
             f"detector_invocation_rate: {detector_calls / max(1, processed):.6f}",

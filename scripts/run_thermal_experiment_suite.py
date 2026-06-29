@@ -37,6 +37,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--thread-session-counts", default=None)
     parser.add_argument("--apply-runtime-actions", action="store_true")
     parser.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="Run each experiment through run_live_dashboard.py for browser monitoring",
+    )
+    parser.add_argument("--dashboard-host", default="0.0.0.0")
+    parser.add_argument("--dashboard-port", type=int, default=8000)
+    parser.add_argument("--dashboard-jpeg-width", type=int, default=960)
+    parser.add_argument("--dashboard-jpeg-quality", type=int, default=78)
+    parser.add_argument("--dashboard-no-video-stream", action="store_true")
+    parser.add_argument(
         "--cooldown-sec",
         type=float,
         default=0.0,
@@ -179,7 +189,11 @@ def main() -> None:
 
             cmd = [
                 sys.executable,
-                str(ROOT / "scripts" / "run_experiment.py"),
+                str(
+                    ROOT
+                    / "scripts"
+                    / ("run_live_dashboard.py" if args.dashboard else "run_experiment.py")
+                ),
                 "--config",
                 str(args.config),
                 "--strategy",
@@ -201,6 +215,21 @@ def main() -> None:
                 cmd.extend(["--thread-session-counts", args.thread_session_counts])
             if args.apply_runtime_actions:
                 cmd.append("--apply-runtime-actions")
+            if args.dashboard:
+                cmd.extend(
+                    [
+                        "--host",
+                        args.dashboard_host,
+                        "--port",
+                        str(args.dashboard_port),
+                        "--jpeg-width",
+                        str(args.dashboard_jpeg_width),
+                        "--jpeg-quality",
+                        str(args.dashboard_jpeg_quality),
+                    ]
+                )
+                if args.dashboard_no_video_stream:
+                    cmd.append("--no-video-stream")
             if args.thermal_state is not None:
                 cmd.extend(["--thermal-state", args.thermal_state])
             if args.thermal_temp_c is not None:

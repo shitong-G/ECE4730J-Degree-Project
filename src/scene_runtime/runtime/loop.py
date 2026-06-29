@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -52,6 +52,7 @@ class RuntimeLoop:
         dry_run: bool = False,
         duration_sec: float | None = None,
         log_path: Path | None = None,
+        live_callback: Callable[[dict[str, Any], np.ndarray, list[Detection], int | None], None] | None = None,
     ) -> None:
         self._config = config
         self._source = frame_source
@@ -100,6 +101,7 @@ class RuntimeLoop:
         )
         self._profile_logger = ProfileLogger(profile_log_path)
         self._profile_log_path = profile_log_path
+        self._live_callback = live_callback
 
     def run(self) -> Path:
         """Execute the 7-step per-frame loop until duration or source ends."""
@@ -233,9 +235,93 @@ class RuntimeLoop:
             )
         )
 
+        if self._live_callback is not None:
+            live_payload = self._build_live_payload(
+                scene_state=scene_state,
+                device_state=device_state,
+                action=action,
+                applied_state=applied_state,
+                summary=summary,
+                latency_ms=latency_ms,
+                did_infer=run_infer,
+                infer_profile=infer_profile,
+                frame_total_ms=frame_total_ms,
+            )
+            self._live_callback(
+                live_payload,
+                frame,
+                self._last_detections,
+                self._engine.last_resolved_input_resolution,
+            )
+
         self._prev_frame = frame.copy()
         self._inference_counter += 1
         self._frame_id += 1
+
+    def _build_live_payload(
+        self,
+        *,
+        scene_state: dict[str, Any],
+        device_state: dict[str, Any],
+        action: RuntimeAction,
+        applied_state: AppliedRuntimeState,
+        summary: dict[str, Any],
+        latency_ms: float,
+        did_infer: bool,
+        infer_profile: dict[str, float],
+        frame_total_ms: float,
+    ) -> dict[str, Any]:
+        loop_fps = self._metrics.fps
+        throttling = device_state.get("throttling") or {}
+        return {
+            "timestamp": time.time(),
+            "frame_id": self._frame_id,
+            "strategy": self._strategy,
+            "workload": scene_state.get("workload", "medium"),
+            "thermal_state": self._controller.last_control_thermal_state,
+            "raw_thermal_state": self._controller.last_raw_thermal_state,
+            "control_thermal_state": self._controller.last_control_thermal_state,
+            "action_mode": action.mode,
+            "decision_reason": self._controller.last_decision_reason,
+            "thermal_pressure_level": self._controller.last_thermal_pressure_level,
+            "temp_slope_c_per_min": self._controller.last_temp_slope_c_per_min,
+            "temp_c": device_state.get("temp_c"),
+            "freq_mhz_avg": device_state.get("freq_mhz_avg"),
+            "arm_clock_mhz": device_state.get("arm_clock_mhz"),
+            "power_w": device_state.get("power_w"),
+            "throttling_raw": throttling.get("raw"),
+            "under_voltage": throttling.get("under_voltage"),
+            "arm_freq_capped": throttling.get("arm_freq_capped"),
+            "currently_throttled": throttling.get("currently_throttled"),
+            "soft_temp_limit": throttling.get("soft_temp_limit"),
+            "did_infer": did_infer,
+            "latency_ms": latency_ms,
+            "loop_fps": loop_fps,
+            "fps": loop_fps,
+            "effective_inference_fps": loop_fps / max(action.inference_interval, 1),
+            "actual_inference_fps": self._metrics.inference_fps,
+            "input_resolution": action.input_resolution,
+            "resolved_input_resolution": self._engine.last_resolved_input_resolution,
+            "inference_interval": action.inference_interval,
+            "cpu_threads": action.cpu_threads,
+            "governor": action.governor,
+            "requested_governor": applied_state.requested_governor,
+            "applied_governor": applied_state.applied_governor,
+            "governor_applied": applied_state.governor_applied,
+            "requested_cpu_affinity": applied_state.requested_cpu_affinity,
+            "applied_cpu_affinity": applied_state.applied_cpu_affinity,
+            "cpu_affinity_applied": applied_state.cpu_affinity_applied,
+            "decoder_layers": action.decoder_layers,
+            "query_budget": action.query_budget,
+            "detection_count": summary["detection_count"],
+            "confidence_mean": summary["confidence_mean"],
+            "frame_total_ms": frame_total_ms,
+            "preprocess_ms": float(infer_profile.get("preprocess_ms", 0.0)),
+            "build_feed_ms": float(infer_profile.get("build_feed_ms", 0.0)),
+            "onnx_run_ms": float(infer_profile.get("onnx_run_ms", 0.0)),
+            "postprocess_ms": float(infer_profile.get("postprocess_ms", 0.0)),
+            "infer_total_ms": float(infer_profile.get("infer_total_ms", latency_ms)),
+        }
 
     def _write_log(
         self,

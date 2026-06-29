@@ -149,6 +149,15 @@ class RuntimeDecisionController:
         self._balanced_critical_governor = str(
             thermal.get("balanced_critical_governor", "powersave")
         )
+        self._balanced_warm_recover_c = self._optional_float(
+            thermal.get("balanced_warm_recover_c")
+        )
+        self._balanced_hot_recover_c = self._optional_float(
+            thermal.get("balanced_hot_recover_c")
+        )
+        self._balanced_critical_recover_c = self._optional_float(
+            thermal.get("balanced_critical_recover_c")
+        )
         self._thermal_guard_state = "normal"
         self._thermal_hold_remaining = 0
         self._thermal_hold_until = 0.0
@@ -577,10 +586,16 @@ class RuntimeDecisionController:
             return True
 
         if self._thermal_guard_state == "critical":
+            if self._is_balanced_thermal_policy() and self._balanced_critical_recover_c is not None:
+                return temp < self._balanced_critical_recover_c
             return temp < (self._critical_c - self._hysteresis_c)
         if self._thermal_guard_state == "hot":
+            if self._is_balanced_thermal_policy() and self._balanced_hot_recover_c is not None:
+                return temp < self._balanced_hot_recover_c
             return temp < (self._warm_max_c - self._hysteresis_c)
         if self._thermal_guard_state == "warm":
+            if self._is_balanced_thermal_policy() and self._balanced_warm_recover_c is not None:
+                return temp < self._balanced_warm_recover_c
             return temp < (self._normal_max_c - self._hysteresis_c)
         return True
 
@@ -600,6 +615,15 @@ class RuntimeDecisionController:
             return float(temp_c) >= threshold
         except (TypeError, ValueError):
             return False
+
+    @staticmethod
+    def _optional_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def _raw_critical_pressure_level(self, temp_c: Any) -> int:
         try:

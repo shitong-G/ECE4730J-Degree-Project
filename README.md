@@ -61,6 +61,57 @@ thermal_balanced
 
 Use `--skip-plot` if pandas/matplotlib are not installed on the Pi.
 
+## Live Dashboard
+
+Run an experiment with a browser dashboard for remote monitoring:
+
+```bash
+sudo -E .venv/bin/python scripts/run_live_dashboard.py \
+  --config configs/raspberry_pi4.yaml \
+  --strategy thermal_balanced \
+  --video data/sample.mp4 \
+  --loop-video \
+  --duration-min 15 \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --enable-thread-sessions \
+  --thread-session-counts 1,2,3,4 \
+  --apply-runtime-actions
+```
+
+Open `http://<raspberry-pi-ip>:8000` from another device on the same network.
+The page shows the live detection stream, temperature, latency, FPS, resolution,
+governor/thread state, throttling flags, and rolling performance curves.
+
+For lower network load, add:
+
+```bash
+--jpeg-width 640 --jpeg-quality 65
+```
+
+If only curves are needed, disable video streaming:
+
+```bash
+--no-video-stream
+```
+
+The repeated thermal suite can also use the same live page:
+
+```bash
+sudo -E .venv/bin/python scripts/run_thermal_experiment_suite.py \
+  --config configs/raspberry_pi4.yaml \
+  --video data/sample.mp4 \
+  --loop-video \
+  --duration-min 15 \
+  --repeats 3 \
+  --cooldown-temp-c 55 \
+  --enable-thread-sessions \
+  --thread-session-counts 1,2,3,4 \
+  --apply-runtime-actions \
+  --dashboard \
+  --dashboard-port 8000
+```
+
 Optional real runtime knobs:
 
 ```bash

@@ -37,7 +37,7 @@ thermal:
   recovery_slope_c_per_min: -0.05
   preemptive_slope_c_per_min: 0.8
   use_throttling_pressure: true
-  soft_temp_limit_state: hot
+  soft_temp_limit_state: warm
   currently_throttled_state: critical
   arm_freq_capped_state: critical
   balanced_interval_cap: 4

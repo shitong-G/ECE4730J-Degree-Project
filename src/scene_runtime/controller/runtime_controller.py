@@ -245,11 +245,12 @@ class RuntimeDecisionController:
         self._update_temp_slope(device_state.get("temp_c"))
         runtime_state = self.classify_runtime_state(scene_state, device_state)
         thermal_state = runtime_state["thermal_state"]
-        thermal_state = self._thermal_state_with_throttling_pressure(
-            thermal_state,
-            device_state.get("throttling") or {},
-        )
-        if self._config.get("policy", {}).get("use_thermal", True):
+        use_thermal = self._config.get("policy", {}).get("use_thermal", True)
+        if use_thermal:
+            thermal_state = self._thermal_state_with_throttling_pressure(
+                thermal_state,
+                device_state.get("throttling") or {},
+            )
             thermal_state = self._guarded_thermal_state(
                 thermal_state,
                 runtime_state.get("temp_c"),

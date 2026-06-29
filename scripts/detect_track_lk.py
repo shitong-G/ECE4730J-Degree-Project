@@ -12,7 +12,7 @@ motion region appears outside every known tracked box. All annotated frames are
 saved as JPGs; no MP4 is written.
 """
 
-from future import annotations
+from __future__ import annotations
 
 import argparse
 import csv
@@ -26,7 +26,7 @@ import math
 import cv2
 import numpy as np
 
-ROOT = Path(file).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from scene_runtime.controller.actions import RuntimeAction
@@ -169,7 +169,7 @@ class LKMultiObjectTracker:
     moves while the other side remains nearly fixed.
     """
 
-    def init(
+    def __init__(
             self,
             *,
             max_corners: int = 54,
@@ -593,7 +593,7 @@ class LKMultiObjectTracker:
 class ResidualMotionGate:
     """Whole-frame, non-learning new-object/scene-change gate."""
 
-    def init(
+    def __init__(
         self,
         *,
         gate_width: int = 320,
@@ -744,7 +744,7 @@ class ResidualMotionGate:
 class ONNXKeyframeDetector:
     """Adapter around the existing project ONNXRTDETREngine."""
 
-    def init(
+    def __init__(
         self,
         *,
         model_path: Path,
@@ -801,7 +801,7 @@ class ONNXKeyframeDetector:
 class DetectTrackController:
     """DETECT -> TRACK -> DETECT state controller."""
 
-    def init(
+    def __init__(
         self,
         detector: ONNXKeyframeDetector,
         tracker: LKMultiObjectTracker,
@@ -1130,5 +1130,5 @@ def main() -> None:
     print(f"Average latency:        {average_total:.2f} ms / processed frame")
 
 
-if name == "main":
+if __name__ == "__main__":
     main()

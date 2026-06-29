@@ -10,3 +10,8 @@ policy:
   fixed_cpu_threads: null
   fixed_cpu_affinity: null
   fixed_governor: null
+
+runtime:
+  default_input_resolution: 640
+  default_inference_interval: 1
+  default_cpu_threads: 4

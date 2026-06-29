@@ -22,11 +22,11 @@ thermal:
   warm_max_c: 84.0
   critical_c: 87.0
   hysteresis_c: 2.5
-  warm_hold_frames: 12
-  hot_hold_frames: 20
+  warm_hold_frames: 8
+  hot_hold_frames: 10
   critical_hold_frames: 45
-  warm_hold_sec: 3.0
-  hot_hold_sec: 6.0
+  warm_hold_sec: 2.0
+  hot_hold_sec: 3.0
   critical_hold_sec: 10.0
   critical_plus_delta_c: 1.5
   critical_max_delta_c: 3.0
@@ -41,6 +41,12 @@ thermal:
   currently_throttled_state: critical
   arm_freq_capped_state: critical
   balanced_interval_cap: 4
+  # Balanced recovery is intentionally less conservative than the generic
+  # hysteresis path: use 480 as a short cooling pulse, then return to 640
+  # before quality-adjusted throughput falls behind the native 640 baseline.
+  balanced_warm_recover_c: 79.0
+  balanced_hot_recover_c: 83.2
+  balanced_critical_recover_c: 85.5
   balanced_normal_governor: performance
   balanced_warm_resolution_steps: 0
   balanced_warm_near_hot_resolution_extra_steps: 0

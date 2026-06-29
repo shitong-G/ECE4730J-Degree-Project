@@ -1,10 +1,13 @@
+extends: thermal_balanced.yaml
+
 strategy:
   name: scene_thermal_coadaptive
-  description: Full co-adaptive policy using both scene workload and device thermal state
+  description: Full co-adaptive policy using scene workload plus quality-first thermal control
 
 policy:
   use_scene: true
   use_thermal: true
+  thermal_balanced: true
   fixed_inference_interval: null
   fixed_input_resolution: null
   fixed_cpu_threads: null

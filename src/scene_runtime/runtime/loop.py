@@ -18,6 +18,7 @@ from scene_runtime.runtime.logger import LogRecord, RuntimeLogger
 from scene_runtime.runtime.metrics import MetricsTracker
 from scene_runtime.scene.detection_history import DetectionHistory
 from scene_runtime.scene.workload_estimator import SceneWorkloadEstimator
+from scene_runtime.tracking import LKTrackingReport, SparseLKBoxTracker
 from scene_runtime.utils.timing import Timer
 from scene_runtime.utils.video import FrameSource
 
@@ -89,6 +90,28 @@ class RuntimeLoop:
             window=int(runtime_cfg.get("metrics_window_frames", 120))
         )
         self._strategy = strategy
+        tracking_cfg = config.get("tracking", {})
+        self._lk_tracking_enabled = bool(tracking_cfg.get("enable_lk_tracking", False))
+        self._lk_force_refresh = bool(
+            tracking_cfg.get("lk_force_refresh_on_failure", False)
+        )
+        self._lk_tracker = (
+            SparseLKBoxTracker(
+                max_corners=int(tracking_cfg.get("lk_max_corners", 40)),
+                min_valid_points=int(tracking_cfg.get("lk_min_valid_points", 5)),
+                min_survival_ratio=float(
+                    tracking_cfg.get("lk_min_survival_ratio", 0.35)
+                ),
+                max_forward_backward_error=float(
+                    tracking_cfg.get("lk_max_forward_backward_error", 1.5)
+                ),
+                max_failure_ratio=float(
+                    tracking_cfg.get("lk_max_failure_ratio", 0.30)
+                ),
+            )
+            if self._lk_tracking_enabled
+            else None
+        )
 
         self._frame_id = 0
         self._inference_counter = 0
@@ -172,6 +195,8 @@ class RuntimeLoop:
             "infer_total_ms": 0.0,
         }
 
+        tracking_report = LKTrackingReport()
+
         if run_infer:
             t0 = time.perf_counter()
             self._last_detections = self._engine.infer(frame, action)
@@ -182,6 +207,25 @@ class RuntimeLoop:
 
             self._metrics.record_latency(latency_ms)
             self._metrics.record_inference()
+            tracking_report = self._reset_lk_tracker(frame)
+        elif self._lk_tracker is not None:
+            t0 = time.perf_counter()
+            tracked_detections, tracking_report = self._lk_tracker.update(frame)
+            tracking_report.tracking_ms = self._elapsed_ms(t0)
+            self._last_detections = tracked_detections
+            if tracking_report.should_refresh and self._lk_force_refresh:
+                t0 = time.perf_counter()
+                self._last_detections = self._engine.infer(frame, action)
+                infer_outer_ms = self._elapsed_ms(t0)
+                infer_profile = self._engine.last_profile
+                latency_ms = float(infer_profile.get("infer_total_ms", infer_outer_ms))
+                self._metrics.record_latency(latency_ms)
+                self._metrics.record_inference()
+                run_infer = True
+                tracking_report = self._reset_lk_tracker(
+                    frame,
+                    reason=f"forced_refresh_{tracking_report.reason}",
+                )
 
         # Detection summary
         t0 = time.perf_counter()
@@ -205,6 +249,7 @@ class RuntimeLoop:
             summary,
             latency_ms,
             run_infer,
+            tracking_report,
         )
         main_log_write_ms = self._elapsed_ms(t0)
 
@@ -244,6 +289,7 @@ class RuntimeLoop:
                 summary=summary,
                 latency_ms=latency_ms,
                 did_infer=run_infer,
+                tracking_report=tracking_report,
                 infer_profile=infer_profile,
                 frame_total_ms=frame_total_ms,
             )
@@ -258,6 +304,22 @@ class RuntimeLoop:
         self._inference_counter += 1
         self._frame_id += 1
 
+    def _reset_lk_tracker(
+        self,
+        frame: np.ndarray,
+        *,
+        reason: str = "detector_frame",
+    ) -> LKTrackingReport:
+        if self._lk_tracker is None:
+            return LKTrackingReport()
+        report = self._lk_tracker.reset(
+            frame,
+            self._last_detections,
+            self._engine.last_resolved_input_resolution,
+        )
+        report.reason = reason
+        return report
+
     def _build_live_payload(
         self,
         *,
@@ -268,6 +330,7 @@ class RuntimeLoop:
         summary: dict[str, Any],
         latency_ms: float,
         did_infer: bool,
+        tracking_report: LKTrackingReport,
         infer_profile: dict[str, float],
         frame_total_ms: float,
     ) -> dict[str, Any]:
@@ -295,6 +358,12 @@ class RuntimeLoop:
             "currently_throttled": throttling.get("currently_throttled"),
             "soft_temp_limit": throttling.get("soft_temp_limit"),
             "did_infer": did_infer,
+            "tracking_mode": tracking_report.mode,
+            "tracking_reason": tracking_report.reason,
+            "tracking_ms": tracking_report.tracking_ms,
+            "tracking_failure_ratio": tracking_report.failure_ratio,
+            "tracking_mean_quality": tracking_report.mean_quality,
+            "tracking_should_refresh": tracking_report.should_refresh,
             "latency_ms": latency_ms,
             "loop_fps": loop_fps,
             "fps": loop_fps,
@@ -332,6 +401,7 @@ class RuntimeLoop:
         summary: dict[str, Any],
         latency_ms: float,
         did_infer: bool,
+        tracking_report: LKTrackingReport,
     ) -> None:
         loop_fps = self._metrics.fps
         effective_inference_fps = loop_fps / max(action.inference_interval, 1)
@@ -361,6 +431,12 @@ class RuntimeLoop:
             currently_throttled=throttling.get("currently_throttled"),
             soft_temp_limit=throttling.get("soft_temp_limit"),
             did_infer=did_infer,
+            tracking_mode=tracking_report.mode,
+            tracking_reason=tracking_report.reason,
+            tracking_ms=tracking_report.tracking_ms,
+            tracking_failure_ratio=tracking_report.failure_ratio,
+            tracking_mean_quality=tracking_report.mean_quality,
+            tracking_should_refresh=tracking_report.should_refresh,
             latency_ms=latency_ms,
             fps=loop_fps,
             loop_fps=loop_fps,

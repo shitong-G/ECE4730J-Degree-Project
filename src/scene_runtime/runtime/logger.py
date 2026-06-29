@@ -30,6 +30,12 @@ LOG_COLUMNS = [
     "currently_throttled",
     "soft_temp_limit",
     "did_infer",
+    "tracking_mode",
+    "tracking_reason",
+    "tracking_ms",
+    "tracking_failure_ratio",
+    "tracking_mean_quality",
+    "tracking_should_refresh",
     "latency_ms",
     "fps",
     "loop_fps",
@@ -80,6 +86,12 @@ class LogRecord:
     currently_throttled: bool | None
     soft_temp_limit: bool | None
     did_infer: bool
+    tracking_mode: str | None
+    tracking_reason: str | None
+    tracking_ms: float
+    tracking_failure_ratio: float
+    tracking_mean_quality: float
+    tracking_should_refresh: bool | None
     latency_ms: float
     fps: float
     loop_fps: float

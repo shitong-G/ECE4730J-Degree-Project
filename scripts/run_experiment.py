@@ -70,6 +70,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Best-effort apply governor and CPU affinity from RuntimeAction",
     )
+    p.add_argument(
+        "--enable-lk-tracking",
+        action="store_true",
+        help="Use Lucas-Kanade tracking to update boxes on skipped detector frames",
+    )
+    p.add_argument(
+        "--lk-force-refresh-on-failure",
+        action="store_true",
+        help="Run RT-DETR immediately when LK tracking quality degrades",
+    )
+    p.add_argument("--lk-max-failure-ratio", type=float, default=None)
+    p.add_argument("--lk-min-valid-points", type=int, default=None)
     return p.parse_args()
 
 
@@ -87,6 +99,14 @@ def main() -> None:
         config.setdefault("inference", {})["thread_session_counts"] = counts
     if args.apply_runtime_actions:
         config.setdefault("os_control", {})["apply_runtime_actions"] = True
+    if args.enable_lk_tracking:
+        config.setdefault("tracking", {})["enable_lk_tracking"] = True
+    if args.lk_force_refresh_on_failure:
+        config.setdefault("tracking", {})["lk_force_refresh_on_failure"] = True
+    if args.lk_max_failure_ratio is not None:
+        config.setdefault("tracking", {})["lk_max_failure_ratio"] = args.lk_max_failure_ratio
+    if args.lk_min_valid_points is not None:
+        config.setdefault("tracking", {})["lk_min_valid_points"] = args.lk_min_valid_points
 
     if args.output is None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")

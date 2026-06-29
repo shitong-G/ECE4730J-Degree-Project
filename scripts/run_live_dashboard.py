@@ -57,6 +57,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-thread-sessions", action="store_true")
     parser.add_argument("--thread-session-counts", default=None)
     parser.add_argument("--apply-runtime-actions", action="store_true")
+    parser.add_argument("--enable-lk-tracking", action="store_true")
+    parser.add_argument("--lk-force-refresh-on-failure", action="store_true")
+    parser.add_argument("--lk-max-failure-ratio", type=float, default=None)
+    parser.add_argument("--lk-min-valid-points", type=int, default=None)
     return parser.parse_args()
 
 
@@ -75,6 +79,14 @@ def main() -> None:
         ]
     if args.apply_runtime_actions:
         config.setdefault("os_control", {})["apply_runtime_actions"] = True
+    if args.enable_lk_tracking:
+        config.setdefault("tracking", {})["enable_lk_tracking"] = True
+    if args.lk_force_refresh_on_failure:
+        config.setdefault("tracking", {})["lk_force_refresh_on_failure"] = True
+    if args.lk_max_failure_ratio is not None:
+        config.setdefault("tracking", {})["lk_max_failure_ratio"] = args.lk_max_failure_ratio
+    if args.lk_min_valid_points is not None:
+        config.setdefault("tracking", {})["lk_min_valid_points"] = args.lk_min_valid_points
 
     if args.output is None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")

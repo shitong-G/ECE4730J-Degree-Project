@@ -112,6 +112,33 @@ sudo -E .venv/bin/python scripts/run_thermal_experiment_suite.py \
   --dashboard-port 8000
 ```
 
+## LK Tracking Compensation
+
+Enable Lucas-Kanade tracking on skipped detector frames:
+
+```bash
+sudo -E .venv/bin/python scripts/run_experiment.py \
+  --config configs/raspberry_pi4.yaml \
+  --strategy thermal_balanced \
+  --video data/sample.mp4 \
+  --loop-video \
+  --duration-min 15 \
+  --enable-thread-sessions \
+  --thread-session-counts 1,2,3,4 \
+  --apply-runtime-actions \
+  --enable-lk-tracking
+```
+
+To allow an immediate RT-DETR refresh when LK tracking quality degrades:
+
+```bash
+--enable-lk-tracking --lk-force-refresh-on-failure
+```
+
+The CSV log adds `tracking_mode`, `tracking_reason`, `tracking_ms`,
+`tracking_failure_ratio`, `tracking_mean_quality`, and
+`tracking_should_refresh`.
+
 Optional real runtime knobs:
 
 ```bash

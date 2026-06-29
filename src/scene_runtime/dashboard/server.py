@@ -218,6 +218,8 @@ INDEX_HTML = r"""<!doctype html>
       const rows = [
         ["Strategy", s.strategy],
         ["Action", s.action_mode],
+        ["Tracking", `${s.tracking_mode || "--"} / ${s.tracking_reason || "--"}`],
+        ["LK quality", `${fmt(s.tracking_mean_quality, 2)} fail=${fmt(s.tracking_failure_ratio, 2)}`],
         ["Thermal state", s.control_thermal_state || s.thermal_state],
         ["Decision", s.decision_reason],
         ["Governor", `${s.governor || "--"} -> ${s.applied_governor || "--"}`],

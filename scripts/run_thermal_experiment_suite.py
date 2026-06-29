@@ -36,6 +36,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-thread-sessions", action="store_true")
     parser.add_argument("--thread-session-counts", default=None)
     parser.add_argument("--apply-runtime-actions", action="store_true")
+    parser.add_argument("--enable-lk-tracking", action="store_true")
+    parser.add_argument("--lk-force-refresh-on-failure", action="store_true")
+    parser.add_argument("--lk-max-failure-ratio", type=float, default=None)
+    parser.add_argument("--lk-min-valid-points", type=int, default=None)
     parser.add_argument(
         "--dashboard",
         action="store_true",
@@ -215,6 +219,14 @@ def main() -> None:
                 cmd.extend(["--thread-session-counts", args.thread_session_counts])
             if args.apply_runtime_actions:
                 cmd.append("--apply-runtime-actions")
+            if args.enable_lk_tracking:
+                cmd.append("--enable-lk-tracking")
+            if args.lk_force_refresh_on_failure:
+                cmd.append("--lk-force-refresh-on-failure")
+            if args.lk_max_failure_ratio is not None:
+                cmd.extend(["--lk-max-failure-ratio", str(args.lk_max_failure_ratio)])
+            if args.lk_min_valid_points is not None:
+                cmd.extend(["--lk-min-valid-points", str(args.lk_min_valid_points)])
             if args.dashboard:
                 cmd.extend(
                     [

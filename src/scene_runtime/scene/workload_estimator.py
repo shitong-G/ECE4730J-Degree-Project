@@ -60,21 +60,19 @@ class SceneWorkloadEstimator:
         return features
 
     def classify_workload(self, features: dict[str, Any]) -> str:
-        """
-        Classify scene workload as ``light``, ``medium``, or ``heavy``.
+        """Classify scene workload as ``light``, ``medium``, or ``heavy``."""
+        edge = float(features.get("edge_density", 0.0))
+        motion = float(features.get("motion_intensity", 0.0))
+        detections = int(features.get("prev_detection_count", 0))
 
-        BACKBONE: returns ``medium`` until the team implements threshold rules
-        (see README TODO — Member 1). Threshold fields from config are reserved.
-        """
-        _ = features
-        _ = (
-            self._light_edge_max,
-            self._light_motion_max,
-            self._heavy_edge_min,
-            self._heavy_motion_min,
-            self._heavy_det_min,
-        )
-        # TODO(Member 1): implement calibrated light / medium / heavy classification
+        if (
+            edge >= self._heavy_edge_min
+            or motion >= self._heavy_motion_min
+            or detections >= self._heavy_det_min
+        ):
+            return "heavy"
+        if edge <= self._light_edge_max and motion <= self._light_motion_max:
+            return "light"
         return "medium"
 
     def update(

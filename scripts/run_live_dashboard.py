@@ -41,6 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--duration-min", type=float, default=15.0)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--log-detections", action="store_true")
+    parser.add_argument("--detection-output", type=Path, default=None)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--history", type=int, default=600, help="Number of dashboard samples to keep")
@@ -124,6 +126,13 @@ def main() -> None:
         dry_run=args.dry_run,
         duration_sec=duration_sec,
         log_path=args.output,
+        detection_log_path=(
+            args.detection_output
+            if args.detection_output is not None
+            else args.output.with_name(args.output.stem + "_detections.jsonl")
+            if args.log_detections
+            else None
+        ),
         live_callback=state.publish,
     )
 

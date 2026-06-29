@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--result-dir", type=Path, default=ROOT / "experiments" / "results" / "thermal_suite")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--loop-video", action="store_true")
+    parser.add_argument("--log-detections", action="store_true")
     parser.add_argument("--enable-thread-sessions", action="store_true")
     parser.add_argument("--thread-session-counts", default=None)
     parser.add_argument("--apply-runtime-actions", action="store_true")
@@ -213,6 +214,8 @@ def main() -> None:
                 cmd.append("--loop-video")
             if args.dry_run:
                 cmd.append("--dry-run")
+            if args.log_detections:
+                cmd.append("--log-detections")
             if args.enable_thread_sessions:
                 cmd.append("--enable-thread-sessions")
             if args.thread_session_counts:

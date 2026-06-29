@@ -14,6 +14,7 @@ from scene_runtime.controller.runtime_controller import RuntimeDecisionControlle
 from scene_runtime.device.state_monitor import DeviceStateMonitor
 from scene_runtime.inference.onnx_engine import ONNXRTDETREngine
 from scene_runtime.inference.postprocess import Detection, detections_summary
+from scene_runtime.runtime.detection_logger import DetectionLogger
 from scene_runtime.runtime.logger import LogRecord, RuntimeLogger
 from scene_runtime.runtime.metrics import MetricsTracker
 from scene_runtime.scene.detection_history import DetectionHistory
@@ -53,6 +54,7 @@ class RuntimeLoop:
         dry_run: bool = False,
         duration_sec: float | None = None,
         log_path: Path | None = None,
+        detection_log_path: Path | None = None,
         live_callback: Callable[[dict[str, Any], np.ndarray, list[Detection], int | None], None] | None = None,
     ) -> None:
         self._config = config
@@ -124,6 +126,7 @@ class RuntimeLoop:
         )
         self._profile_logger = ProfileLogger(profile_log_path)
         self._profile_log_path = profile_log_path
+        self._detection_logger = DetectionLogger(detection_log_path)
         self._live_callback = live_callback
 
     def run(self) -> Path:
@@ -131,6 +134,7 @@ class RuntimeLoop:
         self._engine.load()
         self._logger.open()
         self._profile_logger.open()
+        self._detection_logger.open()
 
         start = time.perf_counter()
         try:
@@ -140,6 +144,7 @@ class RuntimeLoop:
                 self._process_frame(frame)
         finally:
             self._profile_logger.close()
+            self._detection_logger.close()
             self._logger.close()
             self._source.release()
 
@@ -278,6 +283,18 @@ class RuntimeLoop:
                 summary_ms=summary_ms,
                 main_log_write_ms=main_log_write_ms,
             )
+        )
+
+        self._detection_logger.write(
+            timestamp=time.time(),
+            frame_id=self._frame_id,
+            strategy=self._strategy,
+            did_infer=run_infer,
+            tracking_mode=tracking_report.mode,
+            tracking_reason=tracking_report.reason,
+            input_resolution=action.input_resolution,
+            resolved_input_resolution=self._engine.last_resolved_input_resolution,
+            detections=self._last_detections,
         )
 
         if self._live_callback is not None:

@@ -14,10 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_STRATEGIES = [
     "native_rtdetr",
-    "fixed_frame_skip",
-    "fixed_low_power",
-    "thermal_only",
-    "thermal_balanced",
+    "thermal_interval_first",
+    "scene_track_lk",
+    "scene_thermal_interval_lk",
 ]
 
 

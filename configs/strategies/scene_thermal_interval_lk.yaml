@@ -1,0 +1,44 @@
+strategy:
+  name: scene_thermal_interval_lk
+  description: Scene-aware LK temporal reuse combined with interval-first thermal control
+
+extends: thermal_interval_first.yaml
+
+policy:
+  use_scene: true
+  use_thermal: true
+  thermal_balanced: true
+  fixed_inference_interval: null
+  fixed_input_resolution: null
+  fixed_cpu_threads: null
+  fixed_cpu_affinity: null
+  fixed_governor: null
+
+scene_policy:
+  light_resolution_steps: 0
+  medium_resolution_steps: 0
+  heavy_resolution_steps: 0
+  light_interval_min: 4
+  medium_interval_min: 3
+  heavy_interval_min: 2
+  light_thread_cap: 4
+  medium_thread_cap: 4
+  heavy_thread_cap: 4
+  light_governor: performance
+  medium_governor: performance
+  heavy_governor: performance
+  light_query_budget: 200
+  medium_query_budget: 240
+  heavy_query_budget: 300
+  light_decoder_layers: 6
+  medium_decoder_layers: 6
+  heavy_decoder_layers: 6
+
+tracking:
+  enable_lk_tracking: true
+  lk_force_refresh_on_failure: true
+  lk_max_failure_ratio: 0.30
+  lk_min_valid_points: 5
+  lk_min_survival_ratio: 0.35
+  lk_max_forward_backward_error: 1.5
+  lk_max_corners: 40

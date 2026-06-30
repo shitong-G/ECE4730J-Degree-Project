@@ -30,8 +30,12 @@ def parse_args() -> argparse.Namespace:
             "fixed_frame_skip",
             "thermal_only",
             "thermal_balanced",
+            "thermal_interval_first",
             "scene_only",
+            "scene_track_lk",
             "scene_thermal_coadaptive",
+            "scene_thermal_interval_first",
+            "scene_thermal_interval_lk",
         ],
     )
     p.add_argument("--video", type=Path, default=None, help="Video path or omit for synthetic")

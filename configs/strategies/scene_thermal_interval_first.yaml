@@ -1,0 +1,10 @@
+strategy:
+  name: scene_thermal_interval_first
+  description: Scene + thermal co-adaptive policy with interval-first thermal cooling
+
+extends: thermal_interval_first.yaml
+
+policy:
+  use_scene: true
+  use_thermal: true
+  thermal_balanced: true

@@ -149,6 +149,43 @@ class RuntimeDecisionController:
         self._balanced_critical_governor = str(
             thermal.get("balanced_critical_governor", "powersave")
         )
+        scene = config.get("scene_policy", {})
+        self._scene_light_resolution_steps = int(
+            scene.get("light_resolution_steps", 1)
+        )
+        self._scene_medium_resolution_steps = int(
+            scene.get("medium_resolution_steps", 0)
+        )
+        self._scene_heavy_resolution_steps = int(
+            scene.get("heavy_resolution_steps", 0)
+        )
+        self._scene_light_interval_min = int(scene.get("light_interval_min", 2))
+        self._scene_medium_interval_min = int(
+            scene.get("medium_interval_min", self._default_interval)
+        )
+        self._scene_heavy_interval_min = int(
+            scene.get("heavy_interval_min", self._default_interval)
+        )
+        self._scene_light_thread_cap = int(
+            scene.get("light_thread_cap", max(1, self._default_threads - 1))
+        )
+        self._scene_medium_thread_cap = int(
+            scene.get("medium_thread_cap", self._default_threads)
+        )
+        self._scene_heavy_thread_cap = int(
+            scene.get("heavy_thread_cap", self._default_threads)
+        )
+        self._scene_light_governor = str(scene.get("light_governor", "ondemand"))
+        self._scene_medium_governor = str(
+            scene.get("medium_governor", self._balanced_normal_governor)
+        )
+        self._scene_heavy_governor = str(scene.get("heavy_governor", "performance"))
+        self._scene_light_query_budget = int(scene.get("light_query_budget", 120))
+        self._scene_medium_query_budget = int(scene.get("medium_query_budget", 200))
+        self._scene_heavy_query_budget = int(scene.get("heavy_query_budget", 300))
+        self._scene_light_decoder_layers = int(scene.get("light_decoder_layers", 4))
+        self._scene_medium_decoder_layers = int(scene.get("medium_decoder_layers", 6))
+        self._scene_heavy_decoder_layers = int(scene.get("heavy_decoder_layers", 6))
         self._balanced_warm_recover_c = self._optional_float(
             thermal.get("balanced_warm_recover_c")
         )
@@ -306,24 +343,50 @@ class RuntimeDecisionController:
         if workload == "light":
             return RuntimeAction(
                 mode="scene_light",
-                input_resolution=self._lower_resolution(self._default_res, steps=1),
-                inference_interval=max(self._default_interval + 1, 2),
-                cpu_threads=max(1, self._default_threads - 1),
-                governor="ondemand",
-                decoder_layers=4,
-                query_budget=120,
+                input_resolution=self._lower_resolution(
+                    self._default_res,
+                    steps=self._scene_light_resolution_steps,
+                ),
+                inference_interval=max(
+                    self._default_interval,
+                    self._scene_light_interval_min,
+                ),
+                cpu_threads=max(1, min(self._default_threads, self._scene_light_thread_cap)),
+                governor=self._scene_light_governor,
+                decoder_layers=self._scene_light_decoder_layers,
+                query_budget=self._scene_light_query_budget,
             )
         if workload == "heavy":
             return RuntimeAction(
                 mode="scene_heavy",
-                input_resolution=self._default_res,
-                inference_interval=max(1, self._default_interval),
-                cpu_threads=self._default_threads,
-                governor="performance",
-                decoder_layers=6,
-                query_budget=300,
+                input_resolution=self._lower_resolution(
+                    self._default_res,
+                    steps=self._scene_heavy_resolution_steps,
+                ),
+                inference_interval=max(
+                    self._default_interval,
+                    self._scene_heavy_interval_min,
+                ),
+                cpu_threads=max(1, min(self._default_threads, self._scene_heavy_thread_cap)),
+                governor=self._scene_heavy_governor,
+                decoder_layers=self._scene_heavy_decoder_layers,
+                query_budget=self._scene_heavy_query_budget,
             )
-        return self._balanced("scene_medium")
+        return RuntimeAction(
+            mode="scene_medium",
+            input_resolution=self._lower_resolution(
+                self._default_res,
+                steps=self._scene_medium_resolution_steps,
+            ),
+            inference_interval=max(
+                self._default_interval,
+                self._scene_medium_interval_min,
+            ),
+            cpu_threads=max(1, min(self._default_threads, self._scene_medium_thread_cap)),
+            governor=self._scene_medium_governor,
+            decoder_layers=self._scene_medium_decoder_layers,
+            query_budget=self._scene_medium_query_budget,
+        )
 
     def _thermal_adjust(
         self,

@@ -102,6 +102,26 @@ def _quality_weight(row: dict[str, str], weights: dict[int, float]) -> float:
     return weights[min(weights, key=lambda item: abs(item - resolution_int))]
 
 
+def _tracking_quality_weight(row: dict[str, str]) -> float:
+    """Estimate output quality on non-detector frames from LK tracking diagnostics."""
+    if _to_bool(row.get("did_infer")):
+        return 1.0
+    if row.get("tracking_mode") != "track":
+        return 0.0
+    failure_ratio = _to_float(row.get("tracking_failure_ratio"))
+    mean_quality = _to_float(row.get("tracking_mean_quality"))
+    if failure_ratio is None:
+        failure_ratio = 0.0
+    if mean_quality is None:
+        mean_quality = 1.0
+    return max(0.0, min(1.0, mean_quality * (1.0 - failure_ratio)))
+
+
+def _has_output_boxes(row: dict[str, str]) -> bool:
+    count = _to_float(row.get("detection_count"))
+    return count is not None and count > 0
+
+
 def summarize_log(path: Path, weights: dict[int, float], temp_threshold_c: float) -> dict[str, object]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
@@ -111,6 +131,8 @@ def summarize_log(path: Path, weights: dict[int, float], temp_threshold_c: float
 
     raw_inference_count = 0
     quality_inference_count = 0.0
+    output_frame_count = 0
+    quality_output_count = 0.0
     temp_above_sec = 0.0
     soft_count = throttled_count = capped_count = 0
     bool_count = 0
@@ -142,6 +164,10 @@ def summarize_log(path: Path, weights: dict[int, float], temp_threshold_c: float
         if _to_bool(row.get("did_infer")):
             raw_inference_count += 1
             quality_inference_count += _quality_weight(row, weights)
+        output_weight = _tracking_quality_weight(row)
+        if output_weight > 0.0 and _has_output_boxes(row):
+            output_frame_count += 1
+            quality_output_count += _quality_weight(row, weights) * output_weight
 
     latencies = [
         value
@@ -161,12 +187,19 @@ def summarize_log(path: Path, weights: dict[int, float], temp_threshold_c: float
     ]
     qfps = quality_inference_count / duration if duration > 0 else None
     raw_fps = raw_inference_count / duration if duration > 0 else None
+    output_fps = output_frame_count / duration if duration > 0 else None
+    q_output_fps = quality_output_count / duration if duration > 0 else None
     thermal_penalty = 0.0
     if duration > 0:
         thermal_penalty += temp_above_sec / duration
     if bool_count > 0:
         thermal_penalty += throttled_count / bool_count + capped_count / bool_count
     utility = qfps / (1.0 + thermal_penalty) if qfps is not None else None
+    output_utility = (
+        q_output_fps / (1.0 + thermal_penalty)
+        if q_output_fps is not None
+        else None
+    )
 
     return {
         "log": str(path),
@@ -176,9 +209,14 @@ def summarize_log(path: Path, weights: dict[int, float], temp_threshold_c: float
         "frames": len(rows),
         "raw_inference_count": raw_inference_count,
         "quality_adjusted_inference_count": quality_inference_count,
+        "output_frame_count": output_frame_count,
+        "quality_adjusted_output_count": quality_output_count,
         "raw_detector_fps": raw_fps,
         "quality_adjusted_fps": qfps,
+        "output_fps": output_fps,
+        "quality_adjusted_output_fps": q_output_fps,
         "sustained_utility": utility,
+        "sustained_output_utility": output_utility,
         "latency_ms_mean": _mean(latencies),
         "latency_ms_p95": _percentile(latencies, 0.95),
         "actual_inference_fps_mean": _mean(actual_fps),

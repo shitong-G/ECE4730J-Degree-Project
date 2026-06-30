@@ -19,10 +19,10 @@ experiments/
 
 1. Verify runtime-action support on the Pi.
 2. Calibrate resolution quality with 640-resolution RT-DETR as pseudo-label teacher.
-3. Run the four core strategies with cooldown between runs.
+3. Run the core system/scene ablation strategies with cooldown between runs.
 4. Monitor runs through the live dashboard when needed.
 5. Summarize quality-adjusted sustained performance.
-6. Run LK tracking as a separate ablation.
+6. Run temporal tracking quality analysis to compare stale-box reuse with LK.
 7. For annotated benchmark datasets, report real mAP/precision/recall separately.
 
 ## Smoke Test
@@ -84,7 +84,7 @@ The summary provides `pseudo_recall`, `precision_proxy`, `mean_matched_iou`,
 `mean_confidence_drop`, and `detection_count_ratio`. These values are later used
 to compute quality-adjusted FPS.
 
-## Stage 2: Core Four-Strategy Suite
+## Stage 2: Core Strategy Suite
 
 Run the main ablation suite:
 
@@ -95,7 +95,7 @@ sudo -E .venv/bin/python scripts/run_thermal_experiment_suite.py \
   --loop-video \
   --duration-min 15 \
   --repeats 3 \
-  --strategies native_rtdetr,thermal_balanced,scene_only,scene_thermal_coadaptive \
+  --strategies native_rtdetr,thermal_interval_first,scene_track_lk,scene_thermal_interval_lk \
   --cooldown-temp-c 55 \
   --cooldown-poll-sec 10 \
   --max-cooldown-min 30 \
@@ -108,11 +108,15 @@ sudo -E .venv/bin/python scripts/run_thermal_experiment_suite.py \
 Strategies:
 
 ```text
-native_rtdetr              Native RT-DETR: 640 / interval=1 / threads=4 / performance
-thermal_balanced           Quality-first thermal-aware cooling-pulse policy
-scene_only                 Scene-aware only; ignores thermal state
-scene_thermal_coadaptive   Scene-aware + thermal-aware policy
+native_rtdetr                  Native RT-DETR: 640 / interval=1 / threads=4 / performance
+thermal_interval_first         Thermal-aware system control: keep 640, reduce duty cycle first
+scene_track_lk                 Scene-aware temporal reuse: event-triggered RT-DETR + LK box tracking
+scene_thermal_interval_lk      Full method: thermal interval-first budget + event-triggered scene/LK reuse
 ```
+
+For direct comparison with the earlier resolution-first thermal policy, add
+`thermal_balanced` and `scene_thermal_coadaptive` to the strategy list. These
+older policies lower resolution earlier and are useful as ablation baselines.
 
 The log records performance and thermal/power proxy fields:
 
@@ -211,7 +215,7 @@ sudo -E .venv/bin/python scripts/run_thermal_experiment_suite.py \
   --loop-video \
   --duration-min 15 \
   --repeats 3 \
-  --strategies native_rtdetr,thermal_balanced,scene_only,scene_thermal_coadaptive \
+  --strategies native_rtdetr,thermal_interval_first,scene_track_lk,scene_thermal_interval_lk \
   --cooldown-temp-c 55 \
   --log-detections \
   --enable-thread-sessions \
@@ -229,9 +233,9 @@ penalties:
 ```bash
 .venv/bin/python scripts/evaluate_experiment_quality_tradeoff.py \
   experiments/logs/thermal_suite/<run>_r01_01_native_rtdetr.csv \
-  experiments/logs/thermal_suite/<run>_r01_02_thermal_balanced.csv \
-  experiments/logs/thermal_suite/<run>_r01_03_scene_only.csv \
-  experiments/logs/thermal_suite/<run>_r01_04_scene_thermal_coadaptive.csv \
+  experiments/logs/thermal_suite/<run>_r01_02_thermal_interval_first.csv \
+  experiments/logs/thermal_suite/<run>_r01_03_scene_track_lk.csv \
+  experiments/logs/thermal_suite/<run>_r01_04_scene_thermal_interval_lk.csv \
   --quality-summary experiments/results/quality/resolution_quality_summary.csv \
   --output experiments/results/quality_tradeoff_summary.csv
 ```
@@ -241,7 +245,10 @@ Important output fields:
 ```text
 raw_detector_fps
 quality_adjusted_fps
+output_fps
+quality_adjusted_output_fps
 sustained_utility
+sustained_output_utility
 latency_ms_mean
 latency_ms_p95
 temp_c_mean
@@ -263,8 +270,18 @@ raw_detector_fps
 quality_adjusted_fps
   Throughput weighted by estimated detection quality at each resolution.
 
+output_fps
+  Detector frames plus valid LK-tracked output frames. This is the main
+  performance metric for scene_track_lk and scene_thermal_interval_lk.
+
+quality_adjusted_output_fps
+  Output FPS weighted by resolution quality and LK tracking diagnostics.
+
 sustained_utility
   Quality-adjusted FPS penalized by high-temperature time and throttling flags.
+
+sustained_output_utility
+  Output-quality counterpart of sustained_utility for tracking-enabled policies.
 ```
 
 ## Stage 4B: Box-Level Strategy Quality
@@ -276,13 +293,13 @@ against the native RT-DETR run as a pseudo-label teacher:
 .venv/bin/python scripts/evaluate_strategy_detection_quality.py \
   --teacher experiments/logs/thermal_suite/<run>_r01_01_native_rtdetr_detections.jsonl \
   --students \
-    experiments/logs/thermal_suite/<run>_r01_02_thermal_balanced_detections.jsonl \
-    experiments/logs/thermal_suite/<run>_r01_03_scene_only_detections.jsonl \
-    experiments/logs/thermal_suite/<run>_r01_04_scene_thermal_coadaptive_detections.jsonl \
+    experiments/logs/thermal_suite/<run>_r01_02_thermal_interval_first_detections.jsonl \
+    experiments/logs/thermal_suite/<run>_r01_03_scene_track_lk_detections.jsonl \
+    experiments/logs/thermal_suite/<run>_r01_04_scene_thermal_interval_lk_detections.jsonl \
   --student-csvs \
-    experiments/logs/thermal_suite/<run>_r01_02_thermal_balanced.csv \
-    experiments/logs/thermal_suite/<run>_r01_03_scene_only.csv \
-    experiments/logs/thermal_suite/<run>_r01_04_scene_thermal_coadaptive.csv \
+    experiments/logs/thermal_suite/<run>_r01_02_thermal_interval_first.csv \
+    experiments/logs/thermal_suite/<run>_r01_03_scene_track_lk.csv \
+    experiments/logs/thermal_suite/<run>_r01_04_scene_thermal_interval_lk.csv \
   --output experiments/results/strategy_detection_quality_summary.csv \
   --matches-output experiments/results/strategy_detection_quality_frames.csv
 ```
@@ -306,44 +323,54 @@ currently_throttled_ratio
 This is the closest unlabeled-video proxy for comparing native, scene-aware,
 thermal-aware, and scene-thermal co-adaptive output quality frame by frame.
 
-## Stage 5: LK Tracking Ablation
+## Stage 5: Scene Tracking Ablation
 
-LK tracking should be tested separately from the four-strategy thermal/scene
-ablation. First run the co-adaptive policy without LK:
+`scene_track_lk` and `scene_thermal_interval_lk` enable event-triggered LK
+tracking from their YAML configs. They do not use a fixed workload-to-interval
+mapping. Instead:
+
+```text
+first frame                         -> RT-DETR
+healthy tracks                      -> LK tracking
+LK failure ratio too high           -> RT-DETR refresh
+unexplained motion outside boxes    -> RT-DETR refresh
+scene change / camera motion        -> RT-DETR refresh
+safety_refresh_frames reached       -> RT-DETR refresh
+```
+
+In `scene_thermal_interval_lk`, thermal control may impose a minimum detector
+gap through `inference_interval`, so urgent scene refreshes can be deferred
+briefly while the SoC is hot. To isolate the scene-aware contribution, compare
+native RT-DETR with scene-only LK tracking:
 
 ```bash
 sudo -E .venv/bin/python scripts/run_experiment.py \
   --config configs/raspberry_pi4.yaml \
-  --strategy scene_thermal_coadaptive \
+  --strategy native_rtdetr \
   --video data/sample.mp4 \
   --loop-video \
   --duration-min 15 \
-  --output experiments/logs/lk_ablation_no_lk.csv \
+  --output experiments/logs/scene_ablation_native.csv \
+  --log-detections \
   --enable-thread-sessions \
   --thread-session-counts 1,2,3,4 \
   --apply-runtime-actions
 ```
 
-Then run the same policy with LK compensation on skipped detector frames:
+Then run the scene-aware temporal reuse policy:
 
 ```bash
 sudo -E .venv/bin/python scripts/run_experiment.py \
   --config configs/raspberry_pi4.yaml \
-  --strategy scene_thermal_coadaptive \
+  --strategy scene_track_lk \
   --video data/sample.mp4 \
   --loop-video \
   --duration-min 15 \
-  --output experiments/logs/lk_ablation_lk.csv \
+  --output experiments/logs/scene_ablation_track_lk.csv \
+  --log-detections \
   --enable-thread-sessions \
   --thread-session-counts 1,2,3,4 \
-  --apply-runtime-actions \
-  --enable-lk-tracking
-```
-
-Optional immediate detector refresh when LK tracking quality degrades:
-
-```bash
---enable-lk-tracking --lk-force-refresh-on-failure
+  --apply-runtime-actions
 ```
 
 LK-related CSV fields:

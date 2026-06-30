@@ -19,7 +19,7 @@ from scene_runtime.runtime.logger import LogRecord, RuntimeLogger
 from scene_runtime.runtime.metrics import MetricsTracker
 from scene_runtime.scene.detection_history import DetectionHistory
 from scene_runtime.scene.workload_estimator import SceneWorkloadEstimator
-from scene_runtime.tracking import LKTrackingReport, SparseLKBoxTracker
+from scene_runtime.tracking import LKTrackingReport, ResidualMotionGate, SparseLKBoxTracker
 from scene_runtime.utils.timing import Timer
 from scene_runtime.utils.video import FrameSource
 
@@ -97,6 +97,13 @@ class RuntimeLoop:
         self._lk_force_refresh = bool(
             tracking_cfg.get("lk_force_refresh_on_failure", False)
         )
+        self._scene_event_triggered_tracking = bool(
+            tracking_cfg.get("scene_event_triggered", False)
+        )
+        self._safety_refresh_frames = int(
+            tracking_cfg.get("safety_refresh_frames", 300)
+        )
+        self._last_detector_frame = -10**9
         self._lk_tracker = (
             SparseLKBoxTracker(
                 max_corners=int(tracking_cfg.get("lk_max_corners", 40)),
@@ -112,6 +119,25 @@ class RuntimeLoop:
                 ),
             )
             if self._lk_tracking_enabled
+            else None
+        )
+        self._motion_gate = (
+            ResidualMotionGate(
+                gate_width=int(tracking_cfg.get("gate_width", 320)),
+                pixel_threshold=int(tracking_cfg.get("motion_threshold", 24)),
+                outside_ratio_threshold=float(
+                    tracking_cfg.get("outside_ratio_threshold", 0.010)
+                ),
+                min_component_area=int(tracking_cfg.get("min_component_area", 120)),
+                scene_change_ratio_threshold=float(
+                    tracking_cfg.get("scene_change_ratio_threshold", 0.35)
+                ),
+                mask_expand_ratio=float(tracking_cfg.get("mask_expand_ratio", 0.28)),
+                enable_camera_compensation=not bool(
+                    tracking_cfg.get("disable_camera_compensation", False)
+                ),
+            )
+            if self._scene_event_triggered_tracking and self._lk_tracking_enabled
             else None
         )
 
@@ -188,7 +214,10 @@ class RuntimeLoop:
         applied_state = self._action_applier.apply(action)
 
         # Step 6 — inference or skip
-        run_infer = (self._inference_counter % action.inference_interval) == 0
+        if self._scene_event_triggered_tracking and self._lk_tracker is not None:
+            run_infer = self._should_run_event_detector(action)
+        else:
+            run_infer = (self._inference_counter % action.inference_interval) == 0
 
         latency_ms = 0.0
         infer_outer_ms = 0.0
@@ -213,24 +242,46 @@ class RuntimeLoop:
             self._metrics.record_latency(latency_ms)
             self._metrics.record_inference()
             tracking_report = self._reset_lk_tracker(frame)
+            self._last_detector_frame = self._frame_id
         elif self._lk_tracker is not None:
+            previous_boxes = self._detections_to_frame_boxes(
+                self._last_detections,
+                self._prev_frame,
+                self._engine.last_resolved_input_resolution,
+            )
             t0 = time.perf_counter()
             tracked_detections, tracking_report = self._lk_tracker.update(frame)
             tracking_report.tracking_ms = self._elapsed_ms(t0)
             self._last_detections = tracked_detections
-            if tracking_report.should_refresh and self._lk_force_refresh:
-                t0 = time.perf_counter()
-                self._last_detections = self._engine.infer(frame, action)
-                infer_outer_ms = self._elapsed_ms(t0)
-                infer_profile = self._engine.last_profile
-                latency_ms = float(infer_profile.get("infer_total_ms", infer_outer_ms))
-                self._metrics.record_latency(latency_ms)
-                self._metrics.record_inference()
-                run_infer = True
-                tracking_report = self._reset_lk_tracker(
+            if self._scene_event_triggered_tracking:
+                self._apply_event_refresh_gate(
                     frame,
-                    reason=f"forced_refresh_{tracking_report.reason}",
+                    action,
+                    tracking_report,
+                    previous_boxes,
                 )
+            if tracking_report.should_refresh and (
+                self._lk_force_refresh or self._scene_event_triggered_tracking
+            ):
+                if not self._can_run_detector_now(action):
+                    tracking_report.reason = f"refresh_deferred_{tracking_report.reason}"
+                    tracking_report.should_refresh = False
+                    t0 = None
+                else:
+                    t0 = time.perf_counter()
+                if t0 is not None:
+                    self._last_detections = self._engine.infer(frame, action)
+                    infer_outer_ms = self._elapsed_ms(t0)
+                    infer_profile = self._engine.last_profile
+                    latency_ms = float(infer_profile.get("infer_total_ms", infer_outer_ms))
+                    self._metrics.record_latency(latency_ms)
+                    self._metrics.record_inference()
+                    run_infer = True
+                    self._last_detector_frame = self._frame_id
+                    tracking_report = self._reset_lk_tracker(
+                        frame,
+                        reason=f"forced_refresh_{tracking_report.reason}",
+                    )
 
         # Detection summary
         t0 = time.perf_counter()
@@ -320,6 +371,80 @@ class RuntimeLoop:
         self._prev_frame = frame.copy()
         self._inference_counter += 1
         self._frame_id += 1
+
+    def _should_run_event_detector(self, action: RuntimeAction) -> bool:
+        """Initial detector scheduling for event-triggered scene policies."""
+        if self._last_detector_frame < 0:
+            return True
+        if not self._last_detections:
+            return self._can_run_detector_now(action)
+        return False
+
+    def _can_run_detector_now(self, action: RuntimeAction) -> bool:
+        """Honor thermal policy by treating action interval as a minimum gap."""
+        min_gap = max(1, int(action.inference_interval))
+        return (self._frame_id - self._last_detector_frame) >= min_gap
+
+    def _apply_event_refresh_gate(
+        self,
+        frame: np.ndarray,
+        action: RuntimeAction,
+        tracking_report: LKTrackingReport,
+        previous_boxes: list[np.ndarray],
+    ) -> None:
+        """Update tracking_report when event-triggered scene logic wants RT-DETR."""
+        if tracking_report.should_refresh:
+            tracking_report.reason = "lk_tracking_quality_degraded"
+            return
+
+        if self._motion_gate is not None:
+            current_boxes = self._detections_to_frame_boxes(
+                self._last_detections,
+                frame,
+                self._engine.last_resolved_input_resolution,
+            )
+            gate_report = self._motion_gate.analyze(
+                self._prev_frame,
+                frame,
+                previous_boxes,
+                current_boxes,
+            )
+            if gate_report.should_refresh:
+                tracking_report.should_refresh = True
+                tracking_report.reason = gate_report.reason
+                return
+
+        if (
+            self._safety_refresh_frames > 0
+            and self._frame_id - self._last_detector_frame >= self._safety_refresh_frames
+        ):
+            tracking_report.should_refresh = True
+            tracking_report.reason = "long_interval_safety_refresh"
+            return
+
+        if action.inference_interval > 1:
+            tracking_report.reason = "track_healthy_thermal_min_gap"
+
+    def _detections_to_frame_boxes(
+        self,
+        detections: list[Detection],
+        frame: np.ndarray | None,
+        input_resolution: int | None,
+    ) -> list[np.ndarray]:
+        """Convert detector-space boxes to original frame coordinates."""
+        if frame is None or not detections:
+            return []
+        height, width = frame.shape[:2]
+        resolution = float(input_resolution or max(height, width))
+        sx = width / resolution
+        sy = height / resolution
+        boxes: list[np.ndarray] = []
+        for detection in detections:
+            x1, y1, x2, y2 = detection.bbox
+            boxes.append(
+                np.asarray([x1 * sx, y1 * sy, x2 * sx, y2 * sy], dtype=np.float32)
+            )
+        return boxes
 
     def _reset_lk_tracker(
         self,

@@ -1,0 +1,12 @@
+# Raspberry Pi 4 profile using the locally exported L1 20% structured-pruned
+# RT-DETRv2 R18-lite ONNX models from scripts/run_cnn_pruning_experiment.py.
+extends: raspberry_pi4.yaml
+
+inference:
+  model_path: experiments/results/cnn_pruning_checkpoint_640/rtdetr_r18_lite_l1_r20_640.onnx
+  model_paths_by_resolution:
+    320: experiments/results/cnn_pruning_checkpoint/rtdetr_r18_lite_l1_r20_320.onnx
+    480: experiments/results/cnn_pruning_checkpoint_480/rtdetr_r18_lite_l1_r20_480.onnx
+    640: experiments/results/cnn_pruning_checkpoint_640/rtdetr_r18_lite_l1_r20_640.onnx
+  enable_thread_sessions: false
+  thread_session_counts: [1, 2, 3, 4]

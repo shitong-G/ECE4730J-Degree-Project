@@ -5,6 +5,8 @@ from __future__ import annotations
 import shutil
 import subprocess
 
+VCGENCMD_TIMEOUT_SEC = 0.2
+
 
 def read_throttling_state() -> dict[str, bool | str | None]:
     """
@@ -21,7 +23,7 @@ def read_throttling_state() -> dict[str, bool | str | None]:
             ["vcgencmd", "get_throttled"],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=VCGENCMD_TIMEOUT_SEC,
             check=False,
         )
         raw = proc.stdout.strip()
@@ -37,6 +39,10 @@ def read_throttling_state() -> dict[str, bool | str | None]:
             "arm_freq_capped": bool(hex_val & 0x2),
             "currently_throttled": bool(hex_val & 0x4),
             "soft_temp_limit": bool(hex_val & 0x8),
+            "under_voltage_occurred": bool(hex_val & 0x10000),
+            "arm_freq_capped_occurred": bool(hex_val & 0x20000),
+            "throttled_occurred": bool(hex_val & 0x40000),
+            "soft_temp_limit_occurred": bool(hex_val & 0x80000),
         }
     except (subprocess.SubprocessError, ValueError):
         return {"available": False, "raw": None}

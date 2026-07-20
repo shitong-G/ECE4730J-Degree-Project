@@ -24,6 +24,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run thermal baseline/adaptive experiment suite")
     parser.add_argument("--config", type=Path, default=ROOT / "configs" / "raspberry_pi4.yaml")
     parser.add_argument("--video", type=Path, default=ROOT / "data" / "sample.mp4")
+    parser.add_argument(
+        "--camera",
+        choices=["csi"],
+        default=None,
+        help="Use Raspberry Pi CSI camera for every run",
+    )
     parser.add_argument("--duration-min", type=float, default=15.0)
     parser.add_argument("--strategies", default=",".join(DEFAULT_STRATEGIES))
     parser.add_argument("--repeats", type=int, default=1, help="Repeat the full strategy list N times")
@@ -207,7 +213,9 @@ def main() -> None:
                 "--output",
                 str(output),
             ]
-            if args.video is not None:
+            if args.camera is not None:
+                cmd.extend(["--camera", args.camera])
+            elif args.video is not None:
                 cmd.extend(["--video", str(args.video)])
             if args.loop_video:
                 cmd.append("--loop-video")

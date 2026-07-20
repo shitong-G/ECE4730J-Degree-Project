@@ -13,7 +13,7 @@ For Raspberry Pi 4 (1GB), use **64-bit Raspberry Pi OS Lite** without desktop UI
 
 ```bash
 sudo apt update
-sudo apt install -y python3-pip python3-venv libopencv-dev v4l-utils
+sudo apt install -y python3-pip python3-venv libopencv-dev v4l-utils python3-picamera2 python3-rpi.gpio
 ```
 
 Optional for throttling diagnostics:
@@ -75,6 +75,53 @@ bash scripts/export_model_onnx.sh          # default: RT-DETRv2 R18 lite (sp1)
 ```
 
 If export fails with NumPy errors, ensure `numpy<2` (torch 2.1 is not compatible with NumPy 2.x).
+
+## CSI Camera Module v2
+
+Connect the camera ribbon to the CSI connector while the Pi is powered off.
+After booting, verify the camera:
+
+```bash
+libcamera-hello --list-cameras
+```
+
+Run the experiment directly from the CSI camera:
+
+```bash
+python scripts/run_experiment.py \
+  --config configs/raspberry_pi4.yaml \
+  --strategy scene_thermal_interval_lk \
+  --camera csi \
+  --duration-min 15 \
+  --log-detections
+```
+
+Run the live dashboard from the CSI camera:
+
+```bash
+python scripts/run_live_dashboard.py \
+  --config configs/raspberry_pi4.yaml \
+  --strategy scene_thermal_interval_lk \
+  --camera csi \
+  --duration-min 15
+```
+
+## PWM Fan
+
+Use a fan driver or MOSFET module. Do not power a fan directly from a GPIO pin.
+The default Raspberry Pi config uses BCM GPIO18 at 25 kHz:
+
+```yaml
+fan:
+  enabled: true
+  gpio_mode: BCM
+  pwm_pin: 18
+  pwm_frequency_hz: 25000
+```
+
+The runtime increases duty cycle as temperature rises. If logs show
+`fan_mode=pwm_no_gpio`, check that `python3-rpi.gpio` is installed and the
+process has GPIO access.
 
 ## Run on Pi 4GB+ / Pi 5
 

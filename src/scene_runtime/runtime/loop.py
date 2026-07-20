@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,6 +13,7 @@ import numpy as np
 from scene_runtime.controller.actions import RuntimeAction
 from scene_runtime.device.action_applier import AppliedRuntimeState, RuntimeActionApplier
 from scene_runtime.controller.runtime_controller import RuntimeDecisionController
+from scene_runtime.device.fan import FanState, PwmFanController
 from scene_runtime.device.state_monitor import DeviceStateMonitor
 from scene_runtime.inference.onnx_engine import ONNXRTDETREngine
 from scene_runtime.inference.postprocess import Detection, detections_summary
@@ -56,6 +59,9 @@ class RuntimeLoop:
         log_path: Path | None = None,
         detection_log_path: Path | None = None,
         live_callback: Callable[[dict[str, Any], np.ndarray, list[Detection], int | None], None] | None = None,
+        tracking_start_callback: Callable[[dict[str, Any]], None] | None = None,
+        diagnostics_callback: Callable[[], dict[str, Any]] | None = None,
+        fan_controller: PwmFanController | None = None,
     ) -> None:
         self._config = config
         self._source = frame_source
@@ -66,6 +72,8 @@ class RuntimeLoop:
         self._scene = SceneWorkloadEstimator(config)
         self._device = DeviceStateMonitor()
         self._controller = RuntimeDecisionController(config)
+        self._fan = fan_controller or PwmFanController(config)
+        self._owns_fan = fan_controller is None
         self._history = DetectionHistory()
         os_control_cfg = config.get("os_control", {})
         self._action_applier = RuntimeActionApplier(
@@ -82,6 +90,17 @@ class RuntimeLoop:
             providers=infer_cfg.get("onnx_providers"),
             enable_thread_sessions=bool(infer_cfg.get("enable_thread_sessions", False)),
             thread_session_counts=infer_cfg.get("thread_session_counts"),
+            warmup_runs=int(infer_cfg.get("warmup_runs", 0)),
+            warmup_resolutions=infer_cfg.get("warmup_resolutions"),
+            warmup_threads=infer_cfg.get("warmup_threads"),
+            inter_op_num_threads=int(infer_cfg.get("inter_op_num_threads", 1)),
+            execution_mode=str(infer_cfg.get("execution_mode", "sequential")),
+            graph_optimization_level=str(
+                infer_cfg.get("graph_optimization_level", "all")
+            ),
+            enable_cpu_mem_arena=bool(infer_cfg.get("enable_cpu_mem_arena", True)),
+            enable_mem_pattern=bool(infer_cfg.get("enable_mem_pattern", True)),
+            log_severity_level=int(infer_cfg.get("log_severity_level", 3)),
         )
 
         log_cfg = config.get("logging", {})
@@ -90,6 +109,27 @@ class RuntimeLoop:
         self._logger = RuntimeLogger(self._log_path, fmt=log_cfg.get("format", "csv"))
         self._metrics = MetricsTracker(
             window=int(runtime_cfg.get("metrics_window_frames", 120))
+        )
+        self._pre_run_warmup_enabled = bool(
+            runtime_cfg.get("pre_run_warmup_enabled", False)
+        )
+        self._pre_run_warmup_settle_sec = float(
+            runtime_cfg.get("pre_run_warmup_settle_sec", 0.0)
+        )
+        self._pre_run_warmup_full_runs = int(
+            runtime_cfg.get("pre_run_warmup_full_runs", 0)
+        )
+        self._pre_run_warmup_roi_runs = int(
+            runtime_cfg.get("pre_run_warmup_roi_runs", 0)
+        )
+        self._pre_run_warmup_resolution = int(
+            runtime_cfg.get("pre_run_warmup_resolution", 640)
+        )
+        self._pre_run_warmup_threads = int(
+            runtime_cfg.get("pre_run_warmup_threads", 4)
+        )
+        self._pre_run_warmup_roi_resolution = int(
+            runtime_cfg.get("pre_run_warmup_roi_resolution", 320)
         )
         self._strategy = strategy
         tracking_cfg = config.get("tracking", {})
@@ -103,7 +143,79 @@ class RuntimeLoop:
         self._safety_refresh_frames = int(
             tracking_cfg.get("safety_refresh_frames", 300)
         )
+        self._safety_refresh_defer_when_healthy = bool(
+            tracking_cfg.get("safety_refresh_defer_when_healthy", True)
+        )
+        default_hard_limit = (
+            self._safety_refresh_frames * 3
+            if self._safety_refresh_frames > 0
+            else 0
+        )
+        self._safety_refresh_hard_limit_frames = int(
+            tracking_cfg.get("safety_refresh_hard_limit_frames", default_hard_limit)
+        )
+        self._safety_refresh_healthy_max_failure_ratio = float(
+            tracking_cfg.get("safety_refresh_healthy_max_failure_ratio", 0.05)
+        )
+        self._safety_refresh_healthy_min_quality = float(
+            tracking_cfg.get("safety_refresh_healthy_min_quality", 0.75)
+        )
+        self._roi_refresh_enabled = bool(tracking_cfg.get("roi_refresh_enabled", True))
+        self._roi_refresh_resolution = int(tracking_cfg.get("roi_refresh_resolution", 320))
+        self._roi_refresh_expand_ratio = float(
+            tracking_cfg.get("roi_refresh_expand_ratio", 1.8)
+        )
+        self._roi_refresh_max_area_ratio = float(
+            tracking_cfg.get("roi_refresh_max_area_ratio", 0.25)
+        )
+        self._roi_refresh_max_failure_ratio = float(
+            tracking_cfg.get("roi_refresh_max_failure_ratio", 0.60)
+        )
+        self._roi_refresh_min_survivors = int(
+            tracking_cfg.get("roi_refresh_min_survivors", 1)
+        )
+        self._roi_refresh_lk_quality_enabled = bool(
+            tracking_cfg.get("roi_refresh_lk_quality_enabled", False)
+        )
+        self._roi_refresh_lk_max_failed_boxes = int(
+            tracking_cfg.get("roi_refresh_lk_max_failed_boxes", 1)
+        )
+        self._roi_refresh_lk_max_failure_ratio = float(
+            tracking_cfg.get("roi_refresh_lk_max_failure_ratio", 0.40)
+        )
+        self._roi_refresh_lk_max_area_ratio = float(
+            tracking_cfg.get("roi_refresh_lk_max_area_ratio", 0.18)
+        )
+        self._roi_slow_fuse_enabled = bool(
+            tracking_cfg.get("roi_slow_fuse_enabled", True)
+        )
+        self._roi_slow_fuse_threshold_ms = float(
+            tracking_cfg.get("roi_slow_fuse_threshold_ms", 2500.0)
+        )
+        self._roi_slow_fuse_consecutive_limit = int(
+            tracking_cfg.get("roi_slow_fuse_consecutive_limit", 1)
+        )
+        self._roi_slow_fuse_cooldown_frames = int(
+            tracking_cfg.get("roi_slow_fuse_cooldown_frames", 180)
+        )
+        self._roi_slow_fuse_until_frame = -1
+        self._roi_slow_fuse_consecutive_count = 0
+        self._lk_quality_confirm_enabled = bool(
+            tracking_cfg.get("lk_quality_confirm_enabled", True)
+        )
+        self._lk_quality_confirm_frames = int(
+            tracking_cfg.get("lk_quality_confirm_frames", 1)
+        )
+        self._lk_quality_confirm_max_failure_ratio = float(
+            tracking_cfg.get("lk_quality_confirm_max_failure_ratio", 0.60)
+        )
+        self._lk_quality_confirm_min_survivors = int(
+            tracking_cfg.get("lk_quality_confirm_min_survivors", 1)
+        )
+        self._lk_quality_confirm_count = 0
+        self._lk_quality_confirm_total_deferred = 0
         self._last_detector_frame = -10**9
+        self._last_full_detector_frame = -10**9
         self._lk_tracker = (
             SparseLKBoxTracker(
                 max_corners=int(tracking_cfg.get("lk_max_corners", 40)),
@@ -117,6 +229,11 @@ class RuntimeLoop:
                 max_failure_ratio=float(
                     tracking_cfg.get("lk_max_failure_ratio", 0.30)
                 ),
+                redetect_interval=int(tracking_cfg.get("lk_redetect_interval", 5)),
+                redetect_min_points=int(tracking_cfg.get("lk_redetect_min_points", 8)),
+                win_size=int(tracking_cfg.get("lk_win_size", 15)),
+                max_level=int(tracking_cfg.get("lk_max_level", 2)),
+                max_iterations=int(tracking_cfg.get("lk_max_iterations", 15)),
             )
             if self._lk_tracking_enabled
             else None
@@ -146,6 +263,7 @@ class RuntimeLoop:
         self._last_detections: list[Detection] = []
         self._prev_frame: np.ndarray | None = None
         self._current_action: RuntimeAction | None = None
+        self._last_detection_resolution: int | None = None
 
         profile_log_path = self._log_path.with_name(
             self._log_path.stem + "_profile.csv"
@@ -154,27 +272,87 @@ class RuntimeLoop:
         self._profile_log_path = profile_log_path
         self._detection_logger = DetectionLogger(detection_log_path)
         self._live_callback = live_callback
+        self._tracking_start_callback = tracking_start_callback
+        self._diagnostics_callback = diagnostics_callback
 
     def run(self) -> Path:
         """Execute the 7-step per-frame loop until duration or source ends."""
         self._engine.load()
+        source_iter = iter(self._source)
+        try:
+            first_frame = next(source_iter)
+        except StopIteration:
+            return self._log_path
+
+        self._run_pre_logging_warmup(first_frame)
+
         self._logger.open()
         self._profile_logger.open()
         self._detection_logger.open()
 
         start = time.perf_counter()
         try:
-            for frame in self._source:
+            self._process_frame(first_frame)
+            for frame in source_iter:
                 if self._duration_sec and (time.perf_counter() - start) >= self._duration_sec:
                     break
                 self._process_frame(frame)
         finally:
+            if self._owns_fan:
+                self._fan.close()
+            close_device = getattr(self._device, "close", None)
+            if close_device is not None:
+                close_device()
             self._profile_logger.close()
             self._detection_logger.close()
             self._logger.close()
             self._source.release()
 
         return self._log_path
+
+    def _run_pre_logging_warmup(self, frame: np.ndarray) -> None:
+        """Warm governor and ONNX paths before frame 0 is timed or logged."""
+        if not self._pre_run_warmup_enabled:
+            return
+        runtime_cfg = self._config.get("runtime", {})
+        warmup_action = RuntimeAction(
+            mode="pre_run_warmup",
+            input_resolution=self._pre_run_warmup_resolution,
+            inference_interval=1,
+            cpu_threads=self._pre_run_warmup_threads,
+            governor=str(runtime_cfg.get("warmup_governor", "performance")),
+        )
+        self._action_applier.apply(warmup_action)
+        if self._pre_run_warmup_settle_sec > 0:
+            time.sleep(self._pre_run_warmup_settle_sec)
+
+        for _ in range(max(0, self._pre_run_warmup_full_runs)):
+            self._engine.infer(frame, warmup_action)
+
+        roi_runs = max(0, self._pre_run_warmup_roi_runs)
+        if roi_runs <= 0:
+            return
+        roi_frame = self._center_crop_for_warmup(frame)
+        roi_action = replace(
+            warmup_action,
+            input_resolution=self._pre_run_warmup_roi_resolution,
+            mode="pre_run_roi_warmup",
+        )
+        for _ in range(roi_runs):
+            self._engine.infer(roi_frame, roi_action)
+
+    @staticmethod
+    def _center_crop_for_warmup(frame: np.ndarray) -> np.ndarray:
+        height, width = frame.shape[:2]
+        side = max(32, min(height, width) // 3)
+        cx = width // 2
+        cy = height // 2
+        x1 = max(0, cx - side // 2)
+        y1 = max(0, cy - side // 2)
+        x2 = min(width, x1 + side)
+        y2 = min(height, y1 + side)
+        crop = frame[y1:y2, x1:x2]
+        return crop if crop.size else frame
 
     def _elapsed_ms(self, t0: float) -> float:
         return (time.perf_counter() - t0) * 1000.0
@@ -212,6 +390,7 @@ class RuntimeLoop:
         self._current_action = action
         _ = runtime_state
         applied_state = self._action_applier.apply(action)
+        fan_state = self._fan.update(device_state, action.mode)
 
         # Step 6 — inference or skip
         if self._scene_event_triggered_tracking and self._lk_tracker is not None:
@@ -224,31 +403,44 @@ class RuntimeLoop:
         infer_profile = {
             "preprocess_ms": 0.0,
             "build_feed_ms": 0.0,
+            "session_select_ms": 0.0,
             "onnx_run_ms": 0.0,
             "postprocess_ms": 0.0,
             "infer_total_ms": 0.0,
         }
+        infer_diagnostics: dict[str, float] = self._empty_infer_diagnostics()
 
         tracking_report = LKTrackingReport()
 
         if run_infer:
-            t0 = time.perf_counter()
-            self._last_detections = self._engine.infer(frame, action)
-            infer_outer_ms = self._elapsed_ms(t0)
-
-            infer_profile = self._engine.last_profile
+            (
+                self._last_detections,
+                infer_outer_ms,
+                infer_profile,
+            ) = self._infer_with_diagnostics(frame, action, infer_diagnostics)
             latency_ms = float(infer_profile.get("infer_total_ms", infer_outer_ms))
 
             self._metrics.record_latency(latency_ms)
             self._metrics.record_inference()
+            self._last_detection_resolution = self._engine.last_resolved_input_resolution
             tracking_report = self._reset_lk_tracker(frame)
             self._last_detector_frame = self._frame_id
+            self._last_full_detector_frame = self._frame_id
         elif self._lk_tracker is not None:
             previous_boxes = self._detections_to_frame_boxes(
                 self._last_detections,
                 self._prev_frame,
-                self._engine.last_resolved_input_resolution,
+                self._last_detection_resolution,
             )
+            if self._tracking_start_callback is not None:
+                self._tracking_start_callback(
+                    {
+                        "frame_id": self._frame_id,
+                        "strategy": self._strategy,
+                        "tracking_mode": "track",
+                        "did_infer": False,
+                    }
+                )
             t0 = time.perf_counter()
             tracked_detections, tracking_report = self._lk_tracker.update(frame)
             tracking_report.tracking_ms = self._elapsed_ms(t0)
@@ -260,6 +452,7 @@ class RuntimeLoop:
                     tracking_report,
                     previous_boxes,
                 )
+                self._apply_lk_quality_confirmation(tracking_report)
             if tracking_report.should_refresh and (
                 self._lk_force_refresh or self._scene_event_triggered_tracking
             ):
@@ -270,18 +463,58 @@ class RuntimeLoop:
                 else:
                     t0 = time.perf_counter()
                 if t0 is not None:
-                    self._last_detections = self._engine.infer(frame, action)
-                    infer_outer_ms = self._elapsed_ms(t0)
-                    infer_profile = self._engine.last_profile
-                    latency_ms = float(infer_profile.get("infer_total_ms", infer_outer_ms))
-                    self._metrics.record_latency(latency_ms)
-                    self._metrics.record_inference()
-                    run_infer = True
-                    self._last_detector_frame = self._frame_id
-                    tracking_report = self._reset_lk_tracker(
+                    refresh_reason = tracking_report.reason
+                    roi_result = self._try_roi_refresh(
                         frame,
-                        reason=f"forced_refresh_{tracking_report.reason}",
+                        action,
+                        tracking_report,
+                        tracked_detections,
+                        infer_diagnostics,
                     )
+                    if roi_result is not None:
+                        original_tracking_report = tracking_report
+                        self._last_detections, infer_outer_ms, infer_profile = roi_result
+                        self._update_roi_slow_fuse(infer_profile)
+                        latency_ms = float(infer_profile.get("infer_total_ms", infer_outer_ms))
+                        self._metrics.record_latency(latency_ms)
+                        self._metrics.record_inference()
+                        run_infer = True
+                        self._last_detector_frame = self._frame_id
+                        tracking_report = self._reset_lk_tracker(
+                            frame,
+                            reason=f"roi_refresh_{refresh_reason}",
+                            input_resolution=self._last_detection_resolution,
+                        )
+                        self._copy_roi_refresh_fields(
+                            original_tracking_report,
+                            tracking_report,
+                        )
+                    else:
+                        original_tracking_report = tracking_report
+                        (
+                            self._last_detections,
+                            infer_outer_ms,
+                            infer_profile,
+                        ) = self._infer_with_diagnostics(
+                            frame,
+                            action,
+                            infer_diagnostics,
+                        )
+                        latency_ms = float(infer_profile.get("infer_total_ms", infer_outer_ms))
+                        self._metrics.record_latency(latency_ms)
+                        self._metrics.record_inference()
+                        run_infer = True
+                        self._last_detector_frame = self._frame_id
+                        self._last_full_detector_frame = self._frame_id
+                        self._last_detection_resolution = self._engine.last_resolved_input_resolution
+                        tracking_report = self._reset_lk_tracker(
+                            frame,
+                            reason=f"forced_refresh_{refresh_reason}",
+                        )
+                        self._copy_roi_refresh_fields(
+                            original_tracking_report,
+                            tracking_report,
+                        )
 
         # Detection summary
         t0 = time.perf_counter()
@@ -306,10 +539,13 @@ class RuntimeLoop:
             latency_ms,
             run_infer,
             tracking_report,
+            fan_state,
         )
         main_log_write_ms = self._elapsed_ms(t0)
 
         frame_total_ms = self._elapsed_ms(frame_t0)
+        source_profile = self._source.last_profile
+        serial_total_ms = frame_total_ms + float(source_profile.get("source_total_ms", 0.0))
 
         self._profile_logger.write(
             ProfileRecord(
@@ -318,6 +554,18 @@ class RuntimeLoop:
                 strategy=self._strategy,
                 did_infer=run_infer,
 
+                serial_total_ms=serial_total_ms,
+                source_total_ms=float(source_profile.get("source_total_ms", 0.0)),
+                source_wait_ms=float(source_profile.get("source_wait_ms", 0.0)),
+                capture_ms=float(source_profile.get("capture_ms", 0.0)),
+                isp_ms=float(source_profile.get("isp_ms", 0.0)),
+                source_resize_ms=float(source_profile.get("source_resize_ms", 0.0)),
+                source_save_ms=float(source_profile.get("source_save_ms", 0.0)),
+                source_runtime_resize_ms=float(source_profile.get("source_runtime_resize_ms", 0.0)),
+                source_consumer_wait_ms=float(source_profile.get("source_consumer_wait_ms", 0.0)),
+                source_frame_age_ms=float(source_profile.get("source_frame_age_ms", 0.0)),
+                source_dropped_frames=float(source_profile.get("source_dropped_frames", 0.0)),
+                source_error_count=float(source_profile.get("source_error_count", 0.0)),
                 frame_total_ms=frame_total_ms,
                 scene_ms=scene_ms,
                 device_ms=device_ms,
@@ -327,9 +575,32 @@ class RuntimeLoop:
                 infer_outer_ms=infer_outer_ms,
                 preprocess_ms=float(infer_profile.get("preprocess_ms", 0.0)),
                 build_feed_ms=float(infer_profile.get("build_feed_ms", 0.0)),
+                session_select_ms=float(infer_profile.get("session_select_ms", 0.0)),
                 onnx_run_ms=float(infer_profile.get("onnx_run_ms", 0.0)),
                 postprocess_ms=float(infer_profile.get("postprocess_ms", 0.0)),
                 infer_total_ms=float(infer_profile.get("infer_total_ms", latency_ms)),
+
+                diag_infer_start_load1=float(infer_diagnostics.get("diag_infer_start_load1", 0.0)),
+                diag_infer_end_load1=float(infer_diagnostics.get("diag_infer_end_load1", 0.0)),
+                diag_infer_start_mem_available_mb=float(infer_diagnostics.get("diag_infer_start_mem_available_mb", 0.0)),
+                diag_infer_end_mem_available_mb=float(infer_diagnostics.get("diag_infer_end_mem_available_mb", 0.0)),
+                diag_infer_start_process_threads=float(infer_diagnostics.get("diag_infer_start_process_threads", 0.0)),
+                diag_infer_end_process_threads=float(infer_diagnostics.get("diag_infer_end_process_threads", 0.0)),
+                diag_infer_start_bg_active=float(infer_diagnostics.get("diag_infer_start_bg_active", 0.0)),
+                diag_infer_end_bg_active=float(infer_diagnostics.get("diag_infer_end_bg_active", 0.0)),
+                diag_infer_start_bg_pending=float(infer_diagnostics.get("diag_infer_start_bg_pending", 0.0)),
+                diag_infer_end_bg_pending=float(infer_diagnostics.get("diag_infer_end_bg_pending", 0.0)),
+                diag_infer_start_bg_count=float(infer_diagnostics.get("diag_infer_start_bg_count", 0.0)),
+                diag_infer_end_bg_count=float(infer_diagnostics.get("diag_infer_end_bg_count", 0.0)),
+                diag_infer_start_bg_skipped=float(infer_diagnostics.get("diag_infer_start_bg_skipped", 0.0)),
+                diag_infer_end_bg_skipped=float(infer_diagnostics.get("diag_infer_end_bg_skipped", 0.0)),
+                diag_infer_start_bg_errors=float(infer_diagnostics.get("diag_infer_start_bg_errors", 0.0)),
+                diag_infer_end_bg_errors=float(infer_diagnostics.get("diag_infer_end_bg_errors", 0.0)),
+                diag_infer_start_bg_last_source_ms=float(infer_diagnostics.get("diag_infer_start_bg_last_source_ms", 0.0)),
+                diag_infer_end_bg_last_source_ms=float(infer_diagnostics.get("diag_infer_end_bg_last_source_ms", 0.0)),
+                diag_infer_bg_captures_delta=float(infer_diagnostics.get("diag_infer_bg_captures_delta", 0.0)),
+                diag_infer_bg_skipped_delta=float(infer_diagnostics.get("diag_infer_bg_skipped_delta", 0.0)),
+                diag_infer_bg_errors_delta=float(infer_diagnostics.get("diag_infer_bg_errors_delta", 0.0)),
 
                 summary_ms=summary_ms,
                 main_log_write_ms=main_log_write_ms,
@@ -344,7 +615,7 @@ class RuntimeLoop:
             tracking_mode=tracking_report.mode,
             tracking_reason=tracking_report.reason,
             input_resolution=action.input_resolution,
-            resolved_input_resolution=self._engine.last_resolved_input_resolution,
+            resolved_input_resolution=self._last_detection_resolution,
             detections=self._last_detections,
         )
 
@@ -358,14 +629,18 @@ class RuntimeLoop:
                 latency_ms=latency_ms,
                 did_infer=run_infer,
                 tracking_report=tracking_report,
+                fan_state=fan_state,
                 infer_profile=infer_profile,
                 frame_total_ms=frame_total_ms,
+                source_profile=source_profile,
+                serial_total_ms=serial_total_ms,
+                infer_diagnostics=infer_diagnostics,
             )
             self._live_callback(
                 live_payload,
                 frame,
                 self._last_detections,
-                self._engine.last_resolved_input_resolution,
+                self._last_detection_resolution,
             )
 
         self._prev_frame = frame.copy()
@@ -385,6 +660,405 @@ class RuntimeLoop:
         min_gap = max(1, int(action.inference_interval))
         return (self._frame_id - self._last_detector_frame) >= min_gap
 
+    def _try_roi_refresh(
+        self,
+        frame: np.ndarray,
+        action: RuntimeAction,
+        tracking_report: LKTrackingReport,
+        tracked_detections: list[Detection],
+        infer_diagnostics: dict[str, float] | None = None,
+    ) -> tuple[list[Detection], float, dict[str, float]] | None:
+        """Run one low-resolution ROI detector refresh when local evidence allows it."""
+        if not self._roi_refresh_enabled:
+            return None
+        if self._last_detection_resolution is None:
+            return None
+        if tracking_report.reason == "lk_tracking_quality_degraded":
+            if not self._roi_refresh_lk_quality_enabled:
+                return None
+            if not self._lk_quality_roi_allowed(tracking_report):
+                return None
+        elif tracking_report.reason != "unexplained_motion_outside_tracks":
+            return None
+        if (
+            getattr(self, "_roi_slow_fuse_enabled", False)
+            and getattr(self, "_frame_id", 0)
+            < getattr(self, "_roi_slow_fuse_until_frame", -1)
+        ):
+            tracking_report.roi_refresh_candidate = True
+            tracking_report.roi_refresh_reason = tracking_report.reason
+            tracking_report.roi_refresh_reject_reason = "slow_fuse_active"
+            return None
+
+        boxes = tracking_report.refresh_boxes_frame or tracking_report.failed_boxes_frame
+        roi = self._build_roi(frame, boxes)
+        if roi is None:
+            return None
+        x1, y1, x2, y2 = roi
+        frame_h, frame_w = frame.shape[:2]
+        roi_area_ratio = ((x2 - x1) * (y2 - y1)) / max(1.0, float(frame_w * frame_h))
+        max_area_ratio = (
+            self._roi_refresh_lk_max_area_ratio
+            if tracking_report.reason == "lk_tracking_quality_degraded"
+            else self._roi_refresh_max_area_ratio
+        )
+        tracking_report.roi_refresh_candidate = True
+        tracking_report.roi_refresh_reason = tracking_report.reason
+        tracking_report.roi_refresh_area_ratio = float(roi_area_ratio)
+        tracking_report.roi_refresh_width_px = float(x2 - x1)
+        tracking_report.roi_refresh_height_px = float(y2 - y1)
+        tracking_report.roi_refresh_max_area_ratio = float(max_area_ratio)
+        if roi_area_ratio > max_area_ratio:
+            tracking_report.roi_refresh_reject_reason = "area_too_large"
+            return None
+
+        crop = frame[int(y1) : int(y2), int(x1) : int(x2)]
+        if crop.size == 0:
+            tracking_report.roi_refresh_reject_reason = "empty_crop"
+            return None
+
+        tracking_report.roi_refresh_applied = True
+        tracking_report.roi_refresh_reject_reason = None
+        roi_action = replace(action, input_resolution=self._roi_refresh_resolution)
+        roi_detections, infer_outer_ms, infer_profile = self._infer_with_diagnostics(
+            crop,
+            roi_action,
+            infer_diagnostics,
+        )
+        roi_resolution = self._engine.last_resolved_input_resolution or self._roi_refresh_resolution
+        mapped = self._map_roi_detections_to_full_resolution(
+            roi_detections,
+            roi=roi,
+            roi_resolution=roi_resolution,
+            frame_shape=frame.shape,
+            output_resolution=self._last_detection_resolution,
+        )
+        merged = self._merge_detections(tracked_detections, mapped)
+        return merged, infer_outer_ms, infer_profile
+
+    def _infer_with_diagnostics(
+        self,
+        frame: np.ndarray,
+        action: RuntimeAction,
+        infer_diagnostics: dict[str, float] | None = None,
+    ) -> tuple[list[Detection], float, dict[str, float]]:
+        """Run one detector call while sampling lightweight diagnostic context."""
+        diagnostics = infer_diagnostics if infer_diagnostics is not None else {}
+        diagnostics.update(self._sample_infer_diagnostics("start"))
+        t0 = time.perf_counter()
+        detections = self._engine.infer(frame, action)
+        infer_outer_ms = self._elapsed_ms(t0)
+        diagnostics.update(self._sample_infer_diagnostics("end"))
+        self._finalize_infer_diagnostics(diagnostics)
+        return detections, infer_outer_ms, self._engine.last_profile
+
+    @staticmethod
+    def _empty_infer_diagnostics() -> dict[str, float]:
+        keys = [
+            "diag_infer_start_load1",
+            "diag_infer_end_load1",
+            "diag_infer_start_mem_available_mb",
+            "diag_infer_end_mem_available_mb",
+            "diag_infer_start_process_threads",
+            "diag_infer_end_process_threads",
+            "diag_infer_start_bg_active",
+            "diag_infer_end_bg_active",
+            "diag_infer_start_bg_pending",
+            "diag_infer_end_bg_pending",
+            "diag_infer_start_bg_count",
+            "diag_infer_end_bg_count",
+            "diag_infer_start_bg_skipped",
+            "diag_infer_end_bg_skipped",
+            "diag_infer_start_bg_errors",
+            "diag_infer_end_bg_errors",
+            "diag_infer_start_bg_last_source_ms",
+            "diag_infer_end_bg_last_source_ms",
+            "diag_infer_bg_captures_delta",
+            "diag_infer_bg_skipped_delta",
+            "diag_infer_bg_errors_delta",
+        ]
+        return {key: 0.0 for key in keys}
+
+    def _sample_infer_diagnostics(self, phase: str) -> dict[str, float]:
+        prefix = f"diag_infer_{phase}_"
+        diagnostics = {
+            f"{prefix}load1": self._load_average_1m(),
+            f"{prefix}mem_available_mb": self._mem_available_mb(),
+            f"{prefix}process_threads": self._process_thread_count(),
+            f"{prefix}bg_active": 0.0,
+            f"{prefix}bg_pending": 0.0,
+            f"{prefix}bg_count": 0.0,
+            f"{prefix}bg_skipped": 0.0,
+            f"{prefix}bg_errors": 0.0,
+            f"{prefix}bg_last_source_ms": 0.0,
+        }
+        diagnostics_callback = getattr(self, "_diagnostics_callback", None)
+        if diagnostics_callback is None:
+            return diagnostics
+        try:
+            extra = diagnostics_callback()
+        except Exception:
+            return diagnostics
+        diagnostics[f"{prefix}bg_active"] = self._bool_float(extra.get("bg_camera_active"))
+        diagnostics[f"{prefix}bg_pending"] = self._bool_float(extra.get("bg_camera_pending"))
+        diagnostics[f"{prefix}bg_count"] = self._float_or_zero(extra.get("bg_camera_count"))
+        diagnostics[f"{prefix}bg_skipped"] = self._float_or_zero(extra.get("bg_camera_skipped"))
+        diagnostics[f"{prefix}bg_errors"] = self._float_or_zero(extra.get("bg_camera_errors"))
+        diagnostics[f"{prefix}bg_last_source_ms"] = self._float_or_zero(
+            extra.get("bg_camera_last_source_ms")
+        )
+        return diagnostics
+
+    @staticmethod
+    def _finalize_infer_diagnostics(diagnostics: dict[str, float]) -> None:
+        diagnostics["diag_infer_bg_captures_delta"] = max(
+            0.0,
+            diagnostics.get("diag_infer_end_bg_count", 0.0)
+            - diagnostics.get("diag_infer_start_bg_count", 0.0),
+        )
+        diagnostics["diag_infer_bg_skipped_delta"] = max(
+            0.0,
+            diagnostics.get("diag_infer_end_bg_skipped", 0.0)
+            - diagnostics.get("diag_infer_start_bg_skipped", 0.0),
+        )
+        diagnostics["diag_infer_bg_errors_delta"] = max(
+            0.0,
+            diagnostics.get("diag_infer_end_bg_errors", 0.0)
+            - diagnostics.get("diag_infer_start_bg_errors", 0.0),
+        )
+
+    @staticmethod
+    def _load_average_1m() -> float:
+        try:
+            return float(os.getloadavg()[0])
+        except (AttributeError, OSError):
+            return 0.0
+
+    @staticmethod
+    def _mem_available_mb() -> float:
+        meminfo = Path("/proc/meminfo")
+        if not meminfo.exists():
+            return 0.0
+        try:
+            for line in meminfo.read_text(encoding="utf-8").splitlines():
+                if line.startswith("MemAvailable:"):
+                    parts = line.split()
+                    return float(parts[1]) / 1024.0
+        except (OSError, ValueError, IndexError):
+            return 0.0
+        return 0.0
+
+    @staticmethod
+    def _process_thread_count() -> float:
+        task_dir = Path("/proc/self/task")
+        try:
+            if task_dir.exists():
+                return float(sum(1 for _ in task_dir.iterdir()))
+        except OSError:
+            pass
+        return 0.0
+
+    @staticmethod
+    def _bool_float(value: Any) -> float:
+        if isinstance(value, str):
+            return 1.0 if value.strip().lower() in {"1", "true", "yes"} else 0.0
+        return 1.0 if bool(value) else 0.0
+
+    @staticmethod
+    def _float_or_zero(value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _update_roi_slow_fuse(self, infer_profile: dict[str, float]) -> None:
+        if not getattr(self, "_roi_slow_fuse_enabled", False):
+            return
+        latency_ms = float(
+            infer_profile.get("onnx_run_ms")
+            or infer_profile.get("infer_total_ms")
+            or 0.0
+        )
+        if latency_ms <= getattr(self, "_roi_slow_fuse_threshold_ms", 2500.0):
+            self._roi_slow_fuse_consecutive_count = 0
+            return
+        self._roi_slow_fuse_consecutive_count = (
+            getattr(self, "_roi_slow_fuse_consecutive_count", 0) + 1
+        )
+        if self._roi_slow_fuse_consecutive_count < max(
+            1,
+            getattr(self, "_roi_slow_fuse_consecutive_limit", 1),
+        ):
+            return
+        self._roi_slow_fuse_until_frame = max(
+            getattr(self, "_roi_slow_fuse_until_frame", -1),
+            getattr(self, "_frame_id", 0)
+            + max(1, getattr(self, "_roi_slow_fuse_cooldown_frames", 180)),
+        )
+        self._roi_slow_fuse_consecutive_count = 0
+
+    @staticmethod
+    def _copy_roi_refresh_fields(
+        source: LKTrackingReport,
+        target: LKTrackingReport,
+    ) -> None:
+        target.roi_refresh_candidate = source.roi_refresh_candidate
+        target.roi_refresh_applied = source.roi_refresh_applied
+        target.roi_refresh_reason = source.roi_refresh_reason
+        target.roi_refresh_reject_reason = source.roi_refresh_reject_reason
+        target.roi_refresh_area_ratio = source.roi_refresh_area_ratio
+        target.roi_refresh_width_px = source.roi_refresh_width_px
+        target.roi_refresh_height_px = source.roi_refresh_height_px
+        target.roi_refresh_max_area_ratio = source.roi_refresh_max_area_ratio
+        target.lk_quality_confirm_count = source.lk_quality_confirm_count
+        target.lk_quality_confirm_deferred = source.lk_quality_confirm_deferred
+        target.lk_quality_confirm_total_deferred = (
+            source.lk_quality_confirm_total_deferred
+        )
+
+    def _apply_lk_quality_confirmation(
+        self,
+        tracking_report: LKTrackingReport,
+    ) -> None:
+        """Defer soft LK-quality refreshes until degradation persists."""
+        if tracking_report.reason != "lk_tracking_quality_degraded":
+            self._lk_quality_confirm_count = 0
+            tracking_report.lk_quality_confirm_count = 0
+            tracking_report.lk_quality_confirm_total_deferred = (
+                self._lk_quality_confirm_total_deferred
+            )
+            return
+
+        if not tracking_report.should_refresh:
+            tracking_report.lk_quality_confirm_count = self._lk_quality_confirm_count
+            tracking_report.lk_quality_confirm_total_deferred = (
+                self._lk_quality_confirm_total_deferred
+            )
+            return
+
+        self._lk_quality_confirm_count += 1
+        tracking_report.lk_quality_confirm_count = self._lk_quality_confirm_count
+        tracking_report.lk_quality_confirm_total_deferred = (
+            self._lk_quality_confirm_total_deferred
+        )
+
+        if not self._lk_quality_confirm_enabled:
+            return
+        if self._lk_quality_confirm_frames <= 0:
+            return
+        if tracking_report.track_count_after < self._lk_quality_confirm_min_survivors:
+            return
+        if (
+            tracking_report.failure_ratio
+            > self._lk_quality_confirm_max_failure_ratio
+        ):
+            return
+        if self._lk_quality_confirm_count > self._lk_quality_confirm_frames:
+            return
+
+        tracking_report.should_refresh = False
+        tracking_report.reason = "lk_quality_degraded_confirming"
+        tracking_report.lk_quality_confirm_deferred = True
+        self._lk_quality_confirm_total_deferred += 1
+        tracking_report.lk_quality_confirm_total_deferred = (
+            self._lk_quality_confirm_total_deferred
+        )
+
+    def _lk_quality_roi_allowed(self, tracking_report: LKTrackingReport) -> bool:
+        """Allow ROI for LK degradation only when the failure is genuinely local."""
+        if tracking_report.track_count_after < self._roi_refresh_min_survivors:
+            return False
+        if tracking_report.failure_ratio > self._roi_refresh_lk_max_failure_ratio:
+            return False
+        failed_count = len(tracking_report.failed_boxes_frame)
+        if failed_count == 0:
+            return False
+        if failed_count > self._roi_refresh_lk_max_failed_boxes:
+            return False
+        return True
+
+    def _build_roi(
+        self,
+        frame: np.ndarray,
+        boxes: list[np.ndarray],
+    ) -> tuple[float, float, float, float] | None:
+        valid = [np.asarray(box, dtype=np.float32) for box in boxes if box is not None]
+        if not valid:
+            return None
+        height, width = frame.shape[:2]
+        stacked = np.vstack(valid)
+        x1 = float(np.min(stacked[:, 0]))
+        y1 = float(np.min(stacked[:, 1]))
+        x2 = float(np.max(stacked[:, 2]))
+        y2 = float(np.max(stacked[:, 3]))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        cx = 0.5 * (x1 + x2)
+        cy = 0.5 * (y1 + y2)
+        half_w = 0.5 * (x2 - x1) * self._roi_refresh_expand_ratio
+        half_h = 0.5 * (y2 - y1) * self._roi_refresh_expand_ratio
+        side = max(half_w * 2.0, half_h * 2.0, 32.0)
+        half = 0.5 * side
+        rx1 = max(0.0, cx - half)
+        ry1 = max(0.0, cy - half)
+        rx2 = min(float(width), cx + half)
+        ry2 = min(float(height), cy + half)
+        if rx2 - rx1 < 8 or ry2 - ry1 < 8:
+            return None
+        return rx1, ry1, rx2, ry2
+
+    @staticmethod
+    def _map_roi_detections_to_full_resolution(
+        detections: list[Detection],
+        *,
+        roi: tuple[float, float, float, float],
+        roi_resolution: int,
+        frame_shape: tuple[int, ...],
+        output_resolution: int,
+    ) -> list[Detection]:
+        x1, y1, x2, y2 = roi
+        roi_w = max(1.0, x2 - x1)
+        roi_h = max(1.0, y2 - y1)
+        frame_h, frame_w = frame_shape[:2]
+        mapped: list[Detection] = []
+        for detection in detections:
+            bx1, by1, bx2, by2 = detection.bbox
+            fx1 = x1 + bx1 / float(roi_resolution) * roi_w
+            fy1 = y1 + by1 / float(roi_resolution) * roi_h
+            fx2 = x1 + bx2 / float(roi_resolution) * roi_w
+            fy2 = y1 + by2 / float(roi_resolution) * roi_h
+            mapped.append(
+                Detection(
+                    class_id=detection.class_id,
+                    score=detection.score,
+                    bbox=(
+                        float(fx1 / max(1, frame_w) * output_resolution),
+                        float(fy1 / max(1, frame_h) * output_resolution),
+                        float(fx2 / max(1, frame_w) * output_resolution),
+                        float(fy2 / max(1, frame_h) * output_resolution),
+                    ),
+                )
+            )
+        return mapped
+
+    @staticmethod
+    def _merge_detections(
+        base: list[Detection],
+        updates: list[Detection],
+        *,
+        iou_threshold: float = 0.50,
+    ) -> list[Detection]:
+        candidates = sorted(
+            [*base, *updates],
+            key=lambda detection: detection.score,
+            reverse=True,
+        )
+        kept: list[Detection] = []
+        for detection in candidates:
+            if all(_detection_iou(detection, existing) < iou_threshold for existing in kept):
+                kept.append(detection)
+        return kept
+
     def _apply_event_refresh_gate(
         self,
         frame: np.ndarray,
@@ -395,13 +1069,14 @@ class RuntimeLoop:
         """Update tracking_report when event-triggered scene logic wants RT-DETR."""
         if tracking_report.should_refresh:
             tracking_report.reason = "lk_tracking_quality_degraded"
+            tracking_report.refresh_boxes_frame = list(tracking_report.failed_boxes_frame)
             return
 
         if self._motion_gate is not None:
             current_boxes = self._detections_to_frame_boxes(
                 self._last_detections,
                 frame,
-                self._engine.last_resolved_input_resolution,
+                self._last_detection_resolution,
             )
             gate_report = self._motion_gate.analyze(
                 self._prev_frame,
@@ -412,18 +1087,51 @@ class RuntimeLoop:
             if gate_report.should_refresh:
                 tracking_report.should_refresh = True
                 tracking_report.reason = gate_report.reason
+                tracking_report.refresh_boxes_frame = list(gate_report.roi_boxes_frame)
                 return
 
         if (
             self._safety_refresh_frames > 0
-            and self._frame_id - self._last_detector_frame >= self._safety_refresh_frames
+            and self._frame_id - self._last_full_detector_frame >= self._safety_refresh_frames
         ):
+            frames_since_full = self._frame_id - self._last_full_detector_frame
+            hard_limit_reached = (
+                self._safety_refresh_hard_limit_frames > 0
+                and frames_since_full >= self._safety_refresh_hard_limit_frames
+            )
+            if (
+                self._safety_refresh_defer_when_healthy
+                and not hard_limit_reached
+                and self._tracking_report_can_defer_safety_refresh(tracking_report)
+            ):
+                tracking_report.reason = "track_healthy_safety_refresh_deferred"
+                return
             tracking_report.should_refresh = True
-            tracking_report.reason = "long_interval_safety_refresh"
+            tracking_report.reason = (
+                "long_interval_safety_refresh_hard_limit"
+                if hard_limit_reached
+                else "long_interval_safety_refresh"
+            )
             return
 
         if action.inference_interval > 1:
             tracking_report.reason = "track_healthy_thermal_min_gap"
+
+    def _tracking_report_can_defer_safety_refresh(
+        self,
+        tracking_report: LKTrackingReport,
+    ) -> bool:
+        if tracking_report.should_refresh:
+            return False
+        if tracking_report.mode != "track":
+            return False
+        if tracking_report.track_count_after <= 0:
+            return False
+        if tracking_report.failure_ratio > self._safety_refresh_healthy_max_failure_ratio:
+            return False
+        if tracking_report.mean_quality < self._safety_refresh_healthy_min_quality:
+            return False
+        return True
 
     def _detections_to_frame_boxes(
         self,
@@ -451,14 +1159,16 @@ class RuntimeLoop:
         frame: np.ndarray,
         *,
         reason: str = "detector_frame",
+        input_resolution: int | None = None,
     ) -> LKTrackingReport:
         if self._lk_tracker is None:
             return LKTrackingReport()
         report = self._lk_tracker.reset(
             frame,
             self._last_detections,
-            self._engine.last_resolved_input_resolution,
+            input_resolution or self._last_detection_resolution,
         )
+        self._lk_quality_confirm_count = 0
         report.reason = reason
         return report
 
@@ -473,8 +1183,12 @@ class RuntimeLoop:
         latency_ms: float,
         did_infer: bool,
         tracking_report: LKTrackingReport,
+        fan_state: FanState,
         infer_profile: dict[str, float],
         frame_total_ms: float,
+        source_profile: dict[str, float],
+        serial_total_ms: float,
+        infer_diagnostics: dict[str, float],
     ) -> dict[str, Any]:
         loop_fps = self._metrics.fps
         throttling = device_state.get("throttling") or {}
@@ -493,26 +1207,52 @@ class RuntimeLoop:
             "temp_c": device_state.get("temp_c"),
             "freq_mhz_avg": device_state.get("freq_mhz_avg"),
             "arm_clock_mhz": device_state.get("arm_clock_mhz"),
+            "arm_clock_stale": device_state.get("arm_clock_stale"),
+            "firmware_poll_ms": device_state.get("firmware_poll_ms"),
             "power_w": device_state.get("power_w"),
             "throttling_raw": throttling.get("raw"),
+            "throttling_stale": device_state.get("throttling_stale"),
             "under_voltage": throttling.get("under_voltage"),
             "arm_freq_capped": throttling.get("arm_freq_capped"),
             "currently_throttled": throttling.get("currently_throttled"),
             "soft_temp_limit": throttling.get("soft_temp_limit"),
+            "under_voltage_occurred": throttling.get("under_voltage_occurred"),
+            "arm_freq_capped_occurred": throttling.get("arm_freq_capped_occurred"),
+            "throttled_occurred": throttling.get("throttled_occurred"),
+            "soft_temp_limit_occurred": throttling.get("soft_temp_limit_occurred"),
             "did_infer": did_infer,
             "tracking_mode": tracking_report.mode,
             "tracking_reason": tracking_report.reason,
             "tracking_ms": tracking_report.tracking_ms,
+            "tracking_track_count_before": tracking_report.track_count_before,
+            "tracking_track_count_after": tracking_report.track_count_after,
+            "tracking_failed_box_count": len(tracking_report.failed_boxes_frame),
             "tracking_failure_ratio": tracking_report.failure_ratio,
             "tracking_mean_quality": tracking_report.mean_quality,
             "tracking_should_refresh": tracking_report.should_refresh,
+            "lk_quality_confirm_count": tracking_report.lk_quality_confirm_count,
+            "lk_quality_confirm_deferred": tracking_report.lk_quality_confirm_deferred,
+            "lk_quality_confirm_total_deferred": (
+                tracking_report.lk_quality_confirm_total_deferred
+            ),
+            "roi_refresh_candidate": tracking_report.roi_refresh_candidate,
+            "roi_refresh_applied": tracking_report.roi_refresh_applied,
+            "roi_refresh_reason": tracking_report.roi_refresh_reason,
+            "roi_refresh_reject_reason": tracking_report.roi_refresh_reject_reason,
+            "roi_refresh_area_ratio": tracking_report.roi_refresh_area_ratio,
+            "roi_refresh_width_px": tracking_report.roi_refresh_width_px,
+            "roi_refresh_height_px": tracking_report.roi_refresh_height_px,
+            "roi_refresh_max_area_ratio": tracking_report.roi_refresh_max_area_ratio,
+            "fan_enabled": fan_state.enabled,
+            "fan_duty_cycle": fan_state.duty_cycle,
+            "fan_mode": fan_state.mode,
             "latency_ms": latency_ms,
             "loop_fps": loop_fps,
             "fps": loop_fps,
             "effective_inference_fps": loop_fps / max(action.inference_interval, 1),
             "actual_inference_fps": self._metrics.inference_fps,
             "input_resolution": action.input_resolution,
-            "resolved_input_resolution": self._engine.last_resolved_input_resolution,
+            "resolved_input_resolution": self._last_detection_resolution,
             "inference_interval": action.inference_interval,
             "cpu_threads": action.cpu_threads,
             "governor": action.governor,
@@ -526,12 +1266,46 @@ class RuntimeLoop:
             "query_budget": action.query_budget,
             "detection_count": summary["detection_count"],
             "confidence_mean": summary["confidence_mean"],
+            "serial_total_ms": serial_total_ms,
+            "source_total_ms": float(source_profile.get("source_total_ms", 0.0)),
+            "source_wait_ms": float(source_profile.get("source_wait_ms", 0.0)),
+            "capture_ms": float(source_profile.get("capture_ms", 0.0)),
+            "isp_ms": float(source_profile.get("isp_ms", 0.0)),
+            "source_resize_ms": float(source_profile.get("source_resize_ms", 0.0)),
+            "source_save_ms": float(source_profile.get("source_save_ms", 0.0)),
+            "source_runtime_resize_ms": float(source_profile.get("source_runtime_resize_ms", 0.0)),
+            "source_consumer_wait_ms": float(source_profile.get("source_consumer_wait_ms", 0.0)),
+            "source_frame_age_ms": float(source_profile.get("source_frame_age_ms", 0.0)),
+            "source_dropped_frames": float(source_profile.get("source_dropped_frames", 0.0)),
+            "source_error_count": float(source_profile.get("source_error_count", 0.0)),
             "frame_total_ms": frame_total_ms,
             "preprocess_ms": float(infer_profile.get("preprocess_ms", 0.0)),
             "build_feed_ms": float(infer_profile.get("build_feed_ms", 0.0)),
+            "session_select_ms": float(infer_profile.get("session_select_ms", 0.0)),
             "onnx_run_ms": float(infer_profile.get("onnx_run_ms", 0.0)),
             "postprocess_ms": float(infer_profile.get("postprocess_ms", 0.0)),
             "infer_total_ms": float(infer_profile.get("infer_total_ms", latency_ms)),
+            "diag_infer_start_load1": float(infer_diagnostics.get("diag_infer_start_load1", 0.0)),
+            "diag_infer_end_load1": float(infer_diagnostics.get("diag_infer_end_load1", 0.0)),
+            "diag_infer_start_mem_available_mb": float(infer_diagnostics.get("diag_infer_start_mem_available_mb", 0.0)),
+            "diag_infer_end_mem_available_mb": float(infer_diagnostics.get("diag_infer_end_mem_available_mb", 0.0)),
+            "diag_infer_start_process_threads": float(infer_diagnostics.get("diag_infer_start_process_threads", 0.0)),
+            "diag_infer_end_process_threads": float(infer_diagnostics.get("diag_infer_end_process_threads", 0.0)),
+            "diag_infer_start_bg_active": float(infer_diagnostics.get("diag_infer_start_bg_active", 0.0)),
+            "diag_infer_end_bg_active": float(infer_diagnostics.get("diag_infer_end_bg_active", 0.0)),
+            "diag_infer_start_bg_pending": float(infer_diagnostics.get("diag_infer_start_bg_pending", 0.0)),
+            "diag_infer_end_bg_pending": float(infer_diagnostics.get("diag_infer_end_bg_pending", 0.0)),
+            "diag_infer_start_bg_count": float(infer_diagnostics.get("diag_infer_start_bg_count", 0.0)),
+            "diag_infer_end_bg_count": float(infer_diagnostics.get("diag_infer_end_bg_count", 0.0)),
+            "diag_infer_start_bg_skipped": float(infer_diagnostics.get("diag_infer_start_bg_skipped", 0.0)),
+            "diag_infer_end_bg_skipped": float(infer_diagnostics.get("diag_infer_end_bg_skipped", 0.0)),
+            "diag_infer_start_bg_errors": float(infer_diagnostics.get("diag_infer_start_bg_errors", 0.0)),
+            "diag_infer_end_bg_errors": float(infer_diagnostics.get("diag_infer_end_bg_errors", 0.0)),
+            "diag_infer_start_bg_last_source_ms": float(infer_diagnostics.get("diag_infer_start_bg_last_source_ms", 0.0)),
+            "diag_infer_end_bg_last_source_ms": float(infer_diagnostics.get("diag_infer_end_bg_last_source_ms", 0.0)),
+            "diag_infer_bg_captures_delta": float(infer_diagnostics.get("diag_infer_bg_captures_delta", 0.0)),
+            "diag_infer_bg_skipped_delta": float(infer_diagnostics.get("diag_infer_bg_skipped_delta", 0.0)),
+            "diag_infer_bg_errors_delta": float(infer_diagnostics.get("diag_infer_bg_errors_delta", 0.0)),
         }
 
     def _write_log(
@@ -544,6 +1318,7 @@ class RuntimeLoop:
         latency_ms: float,
         did_infer: bool,
         tracking_report: LKTrackingReport,
+        fan_state: FanState,
     ) -> None:
         loop_fps = self._metrics.fps
         effective_inference_fps = loop_fps / max(action.inference_interval, 1)
@@ -566,26 +1341,49 @@ class RuntimeLoop:
             temp_c=device_state.get("temp_c"),
             freq_mhz_avg=device_state.get("freq_mhz_avg"),
             arm_clock_mhz=device_state.get("arm_clock_mhz"),
+            arm_clock_stale=device_state.get("arm_clock_stale"),
+            firmware_poll_ms=float(device_state.get("firmware_poll_ms") or 0.0),
             power_w=device_state.get("power_w"),
             throttling_raw=throttling.get("raw"),
+            throttling_stale=device_state.get("throttling_stale"),
             under_voltage=throttling.get("under_voltage"),
             arm_freq_capped=throttling.get("arm_freq_capped"),
             currently_throttled=throttling.get("currently_throttled"),
             soft_temp_limit=throttling.get("soft_temp_limit"),
+            under_voltage_occurred=throttling.get("under_voltage_occurred"),
+            arm_freq_capped_occurred=throttling.get("arm_freq_capped_occurred"),
+            throttled_occurred=throttling.get("throttled_occurred"),
+            soft_temp_limit_occurred=throttling.get("soft_temp_limit_occurred"),
             did_infer=did_infer,
             tracking_mode=tracking_report.mode,
             tracking_reason=tracking_report.reason,
             tracking_ms=tracking_report.tracking_ms,
+            tracking_track_count_before=tracking_report.track_count_before,
+            tracking_track_count_after=tracking_report.track_count_after,
+            tracking_failed_box_count=len(tracking_report.failed_boxes_frame),
             tracking_failure_ratio=tracking_report.failure_ratio,
             tracking_mean_quality=tracking_report.mean_quality,
             tracking_should_refresh=tracking_report.should_refresh,
+            lk_quality_confirm_count=tracking_report.lk_quality_confirm_count,
+            lk_quality_confirm_deferred=tracking_report.lk_quality_confirm_deferred,
+            lk_quality_confirm_total_deferred=(
+                tracking_report.lk_quality_confirm_total_deferred
+            ),
+            roi_refresh_candidate=tracking_report.roi_refresh_candidate,
+            roi_refresh_applied=tracking_report.roi_refresh_applied,
+            roi_refresh_reason=tracking_report.roi_refresh_reason,
+            roi_refresh_reject_reason=tracking_report.roi_refresh_reject_reason,
+            roi_refresh_area_ratio=tracking_report.roi_refresh_area_ratio,
+            roi_refresh_width_px=tracking_report.roi_refresh_width_px,
+            roi_refresh_height_px=tracking_report.roi_refresh_height_px,
+            roi_refresh_max_area_ratio=tracking_report.roi_refresh_max_area_ratio,
             latency_ms=latency_ms,
             fps=loop_fps,
             loop_fps=loop_fps,
             effective_inference_fps=effective_inference_fps,
             actual_inference_fps=actual_inference_fps,
             input_resolution=action.input_resolution,
-            resolved_input_resolution=self._engine.last_resolved_input_resolution,
+            resolved_input_resolution=self._last_detection_resolution,
             inference_interval=action.inference_interval,
             cpu_threads=action.cpu_threads,
             governor=action.governor,
@@ -599,7 +1397,28 @@ class RuntimeLoop:
             cpu_affinity_apply_error=applied_state.cpu_affinity_apply_error,
             decoder_layers=action.decoder_layers,
             query_budget=action.query_budget,
+            fan_enabled=fan_state.enabled,
+            fan_duty_cycle=fan_state.duty_cycle,
+            fan_mode=fan_state.mode,
             detection_count=summary["detection_count"],
             confidence_mean=summary["confidence_mean"],
         )
         self._logger.write(record)
+
+
+def _detection_iou(a: Detection, b: Detection) -> float:
+    ax1, ay1, ax2, ay2 = a.bbox
+    bx1, by1, bx2, by2 = b.bbox
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    intersection = iw * ih
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - intersection
+    if union <= 0:
+        return 0.0
+    return float(intersection / union)

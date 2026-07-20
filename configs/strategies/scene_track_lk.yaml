@@ -43,11 +43,38 @@ tracking:
   scene_event_triggered: true
   lk_force_refresh_on_failure: true
   safety_refresh_frames: 300
+  safety_refresh_defer_when_healthy: true
+  safety_refresh_hard_limit_frames: 900
+  safety_refresh_healthy_max_failure_ratio: 0.05
+  safety_refresh_healthy_min_quality: 0.75
   lk_max_failure_ratio: 0.30
-  lk_min_valid_points: 5
+  lk_min_valid_points: 4
   lk_min_survival_ratio: 0.35
   lk_max_forward_backward_error: 1.5
-  lk_max_corners: 40
+  lk_max_corners: 24
+  lk_win_size: 15
+  lk_max_level: 2
+  lk_max_iterations: 15
+  lk_redetect_interval: 5
+  lk_redetect_min_points: 8
+  lk_quality_confirm_enabled: true
+  lk_quality_confirm_frames: 1
+  lk_quality_confirm_max_failure_ratio: 0.60
+  lk_quality_confirm_min_survivors: 1
+  roi_refresh_enabled: true
+  roi_refresh_resolution: 320
+  roi_refresh_expand_ratio: 1.8
+  roi_refresh_max_area_ratio: 0.25
+  roi_refresh_max_failure_ratio: 0.60
+  roi_refresh_min_survivors: 1
+  roi_refresh_lk_quality_enabled: false
+  roi_refresh_lk_max_failed_boxes: 1
+  roi_refresh_lk_max_failure_ratio: 0.40
+  roi_refresh_lk_max_area_ratio: 0.18
+  roi_slow_fuse_enabled: true
+  roi_slow_fuse_threshold_ms: 8000
+  roi_slow_fuse_consecutive_limit: 2
+  roi_slow_fuse_cooldown_frames: 45
   gate_width: 320
   motion_threshold: 24
   outside_ratio_threshold: 0.010

@@ -5,6 +5,8 @@ from __future__ import annotations
 import shutil
 import subprocess
 
+VCGENCMD_TIMEOUT_SEC = 0.2
+
 
 def read_arm_clock_mhz() -> float | None:
     """
@@ -22,7 +24,7 @@ def read_arm_clock_mhz() -> float | None:
             ["vcgencmd", "measure_clock", "arm"],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=VCGENCMD_TIMEOUT_SEC,
             check=False,
         )
         raw = proc.stdout.strip()

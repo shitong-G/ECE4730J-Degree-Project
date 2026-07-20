@@ -206,6 +206,22 @@ For curves only:
 --no-video-stream
 ```
 
+## Raspberry Pi Peripherals
+
+The runtime supports Raspberry Pi Camera Module v2 through the CSI connector:
+
+```bash
+sudo -E .venv/bin/python scripts/run_experiment.py \
+  --config configs/raspberry_pi4.yaml \
+  --strategy scene_thermal_interval_lk \
+  --camera csi \
+  --duration-min 15
+```
+
+PWM fan control is configured under `fan:` in the Raspberry Pi YAML profiles.
+The default output is BCM GPIO18 at 25 kHz. Use a fan driver or MOSFET module;
+do not power a fan directly from a GPIO pin.
+
 The repeated suite can also use the dashboard:
 
 ```bash

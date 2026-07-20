@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
@@ -22,6 +22,19 @@ class LKTrackingReport:
     track_count_before: int = 0
     track_count_after: int = 0
     should_refresh: bool = False
+    failed_boxes_frame: list[np.ndarray] = field(default_factory=list)
+    refresh_boxes_frame: list[np.ndarray] = field(default_factory=list)
+    roi_refresh_candidate: bool = False
+    roi_refresh_applied: bool = False
+    roi_refresh_reason: str | None = None
+    roi_refresh_reject_reason: str | None = None
+    roi_refresh_area_ratio: float = 0.0
+    roi_refresh_width_px: float = 0.0
+    roi_refresh_height_px: float = 0.0
+    roi_refresh_max_area_ratio: float = 0.0
+    lk_quality_confirm_count: int = 0
+    lk_quality_confirm_deferred: bool = False
+    lk_quality_confirm_total_deferred: int = 0
 
 
 @dataclass
@@ -30,6 +43,7 @@ class _Track:
     score: float
     bbox_frame: np.ndarray
     points: np.ndarray | None
+    frames_since_redetect: int = 0
 
 
 class SparseLKBoxTracker:
@@ -44,6 +58,11 @@ class SparseLKBoxTracker:
         max_forward_backward_error: float = 1.5,
         max_failure_ratio: float = 0.30,
         min_box_side: int = 5,
+        redetect_interval: int = 5,
+        redetect_min_points: int = 8,
+        win_size: int = 15,
+        max_level: int = 2,
+        max_iterations: int = 15,
     ) -> None:
         self.max_corners = int(max_corners)
         self.min_valid_points = int(min_valid_points)
@@ -51,6 +70,11 @@ class SparseLKBoxTracker:
         self.max_forward_backward_error = float(max_forward_backward_error)
         self.max_failure_ratio = float(max_failure_ratio)
         self.min_box_side = int(min_box_side)
+        self.redetect_interval = int(redetect_interval)
+        self.redetect_min_points = int(redetect_min_points)
+        self.win_size = int(win_size)
+        self.max_level = int(max_level)
+        self.max_iterations = int(max_iterations)
         self._previous_gray: np.ndarray | None = None
         self._tracks: list[_Track] = []
         self._last_input_resolution: int | None = None
@@ -80,6 +104,7 @@ class SparseLKBoxTracker:
                     score=detection.score,
                     bbox_frame=bbox,
                     points=self._points_for_box(gray, bbox),
+                    frames_since_redetect=0,
                 )
             )
         self._previous_gray = gray
@@ -106,6 +131,7 @@ class SparseLKBoxTracker:
                 track_count_before=before,
                 track_count_after=0,
                 should_refresh=True,
+                failed_boxes_frame=[track.bbox_frame.copy() for track in self._tracks],
             )
         if before == 0:
             self._previous_gray = current_gray
@@ -117,13 +143,7 @@ class SparseLKBoxTracker:
                 should_refresh=True,
             )
 
-        survivors: list[_Track] = []
-        qualities: list[float] = []
-        for track in self._tracks:
-            updated, quality = self._update_one(track, current_gray)
-            qualities.append(quality)
-            if updated is not None:
-                survivors.append(updated)
+        survivors, failed_boxes, qualities = self._update_batch(current_gray)
 
         self._previous_gray = current_gray
         self._tracks = survivors
@@ -141,6 +161,7 @@ class SparseLKBoxTracker:
             track_count_before=before,
             track_count_after=len(survivors),
             should_refresh=should_refresh,
+            failed_boxes_frame=failed_boxes,
         )
 
     @property
@@ -171,39 +192,95 @@ class SparseLKBoxTracker:
             useHarrisDetector=False,
         )
 
-    def _update_one(
+    def _update_batch(
         self,
-        track: _Track,
         current_gray: np.ndarray,
-    ) -> tuple[_Track | None, float]:
-        if self._previous_gray is None or track.points is None or len(track.points) == 0:
-            return None, 0.0
+    ) -> tuple[list[_Track], list[np.ndarray], list[float]]:
+        if self._previous_gray is None:
+            return [], [track.bbox_frame.copy() for track in self._tracks], [0.0] * len(self._tracks)
+
+        eligible: list[tuple[int, _Track, int, int]] = []
+        all_points: list[np.ndarray] = []
+        failed_boxes: list[np.ndarray] = []
+        qualities = [0.0 for _ in self._tracks]
+        start = 0
+        for index, track in enumerate(self._tracks):
+            if track.points is None or len(track.points) == 0:
+                failed_boxes.append(track.bbox_frame.copy())
+                continue
+            points = track.points.astype(np.float32).reshape(-1, 1, 2)
+            end = start + len(points)
+            eligible.append((index, track, start, end))
+            all_points.append(points)
+            start = end
+
+        if not all_points:
+            return [], failed_boxes, qualities
+
+        points_batch = np.concatenate(all_points, axis=0)
 
         next_points, status_forward, _ = cv2.calcOpticalFlowPyrLK(
             self._previous_gray,
             current_gray,
-            track.points,
+            points_batch,
             None,
-            winSize=(21, 21),
-            maxLevel=3,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+            winSize=(self.win_size, self.win_size),
+            maxLevel=self.max_level,
+            criteria=(
+                cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+                self.max_iterations,
+                0.01,
+            ),
         )
         if next_points is None or status_forward is None:
-            return None, 0.0
+            return [], [track.bbox_frame.copy() for track in self._tracks], qualities
 
         backward_points, status_backward, _ = cv2.calcOpticalFlowPyrLK(
             current_gray,
             self._previous_gray,
             next_points,
             None,
-            winSize=(21, 21),
-            maxLevel=3,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+            winSize=(self.win_size, self.win_size),
+            maxLevel=self.max_level,
+            criteria=(
+                cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+                self.max_iterations,
+                0.01,
+            ),
         )
         if backward_points is None or status_backward is None:
-            return None, 0.0
+            return [], [track.bbox_frame.copy() for track in self._tracks], qualities
 
-        old_xy = track.points.reshape(-1, 2)
+        survivors: list[_Track] = []
+        for index, track, start, end in eligible:
+            updated, quality = self._update_from_flow(
+                track,
+                current_gray,
+                old_points=points_batch[start:end],
+                next_points=next_points[start:end],
+                backward_points=backward_points[start:end],
+                status_forward=status_forward[start:end],
+                status_backward=status_backward[start:end],
+            )
+            qualities[index] = quality
+            if updated is not None:
+                survivors.append(updated)
+            else:
+                failed_boxes.append(track.bbox_frame.copy())
+        return survivors, failed_boxes, qualities
+
+    def _update_from_flow(
+        self,
+        track: _Track,
+        current_gray: np.ndarray,
+        *,
+        old_points: np.ndarray,
+        next_points: np.ndarray,
+        backward_points: np.ndarray,
+        status_forward: np.ndarray,
+        status_backward: np.ndarray,
+    ) -> tuple[_Track | None, float]:
+        old_xy = old_points.reshape(-1, 2)
         new_xy = next_points.reshape(-1, 2)
         backward_xy = backward_points.reshape(-1, 2)
         height, width = current_gray.shape
@@ -217,7 +294,7 @@ class SparseLKBoxTracker:
             & (new_xy[:, 1] < height)
         )
         valid_count = int(valid.sum())
-        quality = valid_count / max(1, len(track.points))
+        quality = valid_count / max(1, len(old_points))
         if valid_count < self.min_valid_points or quality < self.min_survival_ratio:
             return None, quality
 
@@ -232,10 +309,28 @@ class SparseLKBoxTracker:
         if bbox[2] - bbox[0] < self.min_box_side or bbox[3] - bbox[1] < self.min_box_side:
             return None, quality
 
-        points = self._points_for_box(current_gray, bbox)
-        if points is None or len(points) < self.min_valid_points:
-            points = new_xy[valid].reshape(-1, 1, 2).astype(np.float32)
-        return _Track(track.class_id, track.score, bbox, points), quality
+        tracked_points = new_xy[valid].reshape(-1, 1, 2).astype(np.float32)
+        frames_since_redetect = track.frames_since_redetect + 1
+        should_redetect = (
+            (self.redetect_interval > 0 and frames_since_redetect >= self.redetect_interval)
+            or len(tracked_points) < self.redetect_min_points
+        )
+        points = tracked_points
+        if should_redetect:
+            refreshed = self._points_for_box(current_gray, bbox)
+            if refreshed is not None and len(refreshed) >= self.min_valid_points:
+                points = refreshed
+                frames_since_redetect = 0
+        return (
+            _Track(
+                track.class_id,
+                track.score,
+                bbox,
+                points,
+                frames_since_redetect=frames_since_redetect,
+            ),
+            quality,
+        )
 
     def _tracks_to_detections(self) -> list[Detection]:
         if self._last_input_resolution is None or self._last_frame_shape is None:

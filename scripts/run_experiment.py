@@ -15,6 +15,8 @@ from scene_runtime.runtime.config import load_config
 from scene_runtime.runtime.loop import RuntimeLoop
 from scene_runtime.utils.video import FrameSource
 
+from summarize_stage_latency import print_stage_latency_summary
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Scene-runtime experiment runner")
@@ -40,9 +42,27 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--video", type=Path, default=None, help="Video path or omit for synthetic")
     p.add_argument(
+        "--camera",
+        choices=["csi"],
+        default=None,
+        help="Use Raspberry Pi CSI camera via Picamera2",
+    )
+    p.add_argument(
         "--loop-video",
         action="store_true",
         help="Loop the input video until duration-min is reached",
+    )
+    p.add_argument(
+        "--frame-width",
+        type=int,
+        default=0,
+        help="Resize runtime input frames to this width before scene analysis, LK tracking, and RT-DETR. Use with --frame-height.",
+    )
+    p.add_argument(
+        "--frame-height",
+        type=int,
+        default=0,
+        help="Resize runtime input frames to this height before scene analysis, LK tracking, and RT-DETR. Use with --frame-width.",
     )
     p.add_argument("--dry-run", action="store_true", help="Simulate inference without ONNX model")
     p.add_argument("--duration-min", type=float, default=15.0)
@@ -92,11 +112,19 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--lk-max-failure-ratio", type=float, default=None)
     p.add_argument("--lk-min-valid-points", type=int, default=None)
+    p.add_argument(
+        "--no-stage-summary",
+        action="store_true",
+        help="Do not print post-experiment overall/stage latency summary",
+    )
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if (args.frame_width > 0) != (args.frame_height > 0):
+        raise ValueError("--frame-width and --frame-height must be set together")
+
     config = load_config(args.config, args.strategy)
     if args.thermal_state is not None:
         config.setdefault("thermal", {})["override_state"] = args.thermal_state
@@ -126,12 +154,30 @@ def main() -> None:
 
     duration_sec = args.duration_min * 60.0
     max_frames = int(duration_sec * 10) if args.dry_run else None
+    camera_cfg = config.get("camera", {})
+    use_camera = args.camera or (None if args.video else camera_cfg.get("backend"))
+    if use_camera == "video":
+        use_camera = None
+    if args.dry_run and args.camera is None:
+        use_camera = None
+    frame_size = (
+        (int(args.frame_width), int(args.frame_height))
+        if args.frame_width > 0 and args.frame_height > 0
+        else None
+    )
 
     source = FrameSource(
         args.video,
-        synthetic=args.video is None,
+        synthetic=(args.video is None and use_camera is None),
         max_frames=max_frames,
         loop=args.loop_video,
+        frame_size=frame_size,
+        camera_backend=use_camera,
+        camera_size=(
+            int(camera_cfg.get("csi_width", 640)),
+            int(camera_cfg.get("csi_height", 480)),
+        ),
+        camera_framerate=int(camera_cfg.get("csi_framerate", 30)),
     )
 
     loop = RuntimeLoop(
@@ -154,6 +200,11 @@ def main() -> None:
     print(f"  strategy: {args.strategy}")
     print(f"  dry_run:  {args.dry_run}")
     print(f"  log:      {log_path}")
+    print(f"  profile:  {log_path.with_name(log_path.stem + '_profile.csv')}")
+    if not args.no_stage_summary:
+        print("\nPost-experiment stage latency summary")
+        print("=====================================")
+        print_stage_latency_summary(log_path)
 
 
 if __name__ == "__main__":

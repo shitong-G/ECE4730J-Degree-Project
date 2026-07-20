@@ -135,6 +135,16 @@ INDEX_HTML = r"""<!doctype html>
       min-height: 38px;
       font-size: 13px;
     }
+    .section-title {
+      grid-column: 1 / -1;
+      background: #13191f;
+      color: var(--cyan);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      padding: 8px 11px;
+    }
     .cell span { color: var(--muted); display: block; font-size: 11px; margin-bottom: 3px; }
     @media (max-width: 920px) {
       main { grid-template-columns: 1fr; }
@@ -157,8 +167,13 @@ INDEX_HTML = r"""<!doctype html>
       <h2>Current Runtime</h2>
       <div class="grid">
         <div class="metric"><div class="label">Temperature</div><div class="value" id="temp">--</div></div>
-        <div class="metric"><div class="label">Latency</div><div class="value" id="latency">--</div></div>
-        <div class="metric"><div class="label">Actual FPS</div><div class="value" id="actualFps">--</div></div>
+        <div class="metric"><div class="label">Serial</div><div class="value" id="serialMs">--</div></div>
+        <div class="metric"><div class="label">Capture</div><div class="value" id="captureMs">--</div></div>
+        <div class="metric"><div class="label">ISP</div><div class="value" id="ispMs">--</div></div>
+        <div class="metric"><div class="label">RT-DETR</div><div class="value" id="latency">--</div></div>
+        <div class="metric"><div class="label">LK Tracking</div><div class="value" id="trackMs">--</div></div>
+        <div class="metric"><div class="label">Process FPS</div><div class="value" id="processFps">--</div></div>
+        <div class="metric"><div class="label">Detector FPS</div><div class="value" id="detectorFps">--</div></div>
         <div class="metric"><div class="label">Resolution</div><div class="value" id="res">--</div></div>
       </div>
       <div class="table" id="details"></div>
@@ -215,23 +230,53 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     function updateDetails(s) {
-      const rows = [
+      const sections = [
+        ["Runtime", [
         ["Strategy", s.strategy],
         ["Action", s.action_mode],
+        ["Frame", s.frame_id],
+        ["Did infer", s.did_infer],
+        ["Interval", s.inference_interval],
+        ["Resolution", s.resolved_input_resolution || s.input_resolution],
+        ["Threads", s.cpu_threads],
+        ["Detections", s.detection_count],
+        ]],
+        ["Tracking / Detector", [
         ["Tracking", `${s.tracking_mode || "--"} / ${s.tracking_reason || "--"}`],
         ["LK quality", `${fmt(s.tracking_mean_quality, 2)} fail=${fmt(s.tracking_failure_ratio, 2)}`],
+        ["LK ms", fmt(s.tracking_ms, 0)],
+        ["RT-DETR ms", fmt(s.latency_ms, 0)],
+        ["ONNX ms", fmt(s.onnx_run_ms, 0)],
+        ["Process FPS", fmt(s.loop_fps, 3)],
+        ["Detector FPS", fmt(s.actual_inference_fps, 3)],
+        ["Effective FPS", fmt(s.effective_inference_fps, 3)],
+        ]],
+        ["Thermal / Control", [
         ["Thermal state", s.control_thermal_state || s.thermal_state],
         ["Decision", s.decision_reason],
         ["Governor", `${s.governor || "--"} -> ${s.applied_governor || "--"}`],
-        ["Threads", s.cpu_threads],
-        ["Interval", s.inference_interval],
-        ["Detections", s.detection_count],
         ["Freq MHz", fmt(s.freq_mhz_avg, 0)],
         ["ARM clock", fmt(s.arm_clock_mhz, 0)],
         ["Soft temp limit", s.soft_temp_limit],
         ["Throttled", s.currently_throttled],
+        ]],
+        ["Frame Source", [
+        ["Serial ms", fmt(s.serial_total_ms, 0)],
+        ["Source ms", fmt(s.source_total_ms, 0)],
+        ["Capture ms", fmt(s.capture_ms, 0)],
+        ["ISP ms", fmt(s.isp_ms, 0)],
+        ["Source resize", fmt(s.source_resize_ms, 0)],
+        ["Input resize", fmt(s.source_runtime_resize_ms, 0)],
+        ["Consumer wait", fmt(s.source_consumer_wait_ms, 0)],
+        ["Frame age", fmt(s.source_frame_age_ms, 0)],
+        ["Dropped frames", fmt(s.source_dropped_frames, 0)],
+        ["Source errors", fmt(s.source_error_count, 0)],
+        ]],
       ];
-      byId("details").innerHTML = rows.map(([k, v]) => `<div class="cell"><span>${k}</span>${v ?? "--"}</div>`).join("");
+      byId("details").innerHTML = sections.map(([title, rows]) => (
+        `<div class="section-title">${title}</div>` +
+        rows.map(([k, v]) => `<div class="cell"><span>${k}</span>${v ?? "--"}</div>`).join("")
+      )).join("");
     }
 
     async function tick() {
@@ -243,13 +288,19 @@ INDEX_HTML = r"""<!doctype html>
         const age = Date.now() / 1000 - (state.updated_at || 0);
         byId("status").textContent = `${state.host || location.host} | frame ${state.frame_id ?? "--"} | ${age.toFixed(1)}s ago`;
         byId("temp").innerHTML = `${fmt(state.temp_c)}<span class="unit">C</span>`;
+        byId("serialMs").innerHTML = `${fmt(state.serial_total_ms, 0)}<span class="unit">ms</span>`;
+        byId("captureMs").innerHTML = `${fmt(state.capture_ms, 0)}<span class="unit">ms</span>`;
+        byId("ispMs").innerHTML = `${fmt(state.isp_ms, 0)}<span class="unit">ms</span>`;
         byId("latency").innerHTML = `${fmt(state.latency_ms, 0)}<span class="unit">ms</span>`;
-        byId("actualFps").textContent = fmt(state.actual_inference_fps, 3);
+        byId("trackMs").innerHTML = `${fmt(state.tracking_ms, 0)}<span class="unit">ms</span>`;
+        byId("processFps").textContent = fmt(state.loop_fps ?? state.fps, 3);
+        byId("detectorFps").textContent = fmt(state.actual_inference_fps, 3);
         byId("res").textContent = state.resolved_input_resolution || state.input_resolution || "--";
         updateDetails(state);
         drawChart(byId("chartThermal"), [
           {name: "temp C", color: "#f4c95d", values: history.map(x => x.temp_c)},
-          {name: "actual FPS", color: "#60d394", values: history.map(x => x.actual_inference_fps)},
+          {name: "process FPS", color: "#60d394", values: history.map(x => x.loop_fps ?? x.fps)},
+          {name: "detector FPS", color: "#48cae4", values: history.map(x => x.actual_inference_fps)},
           {name: "resolution/10", color: "#8ab4f8", values: history.map(x => (x.resolved_input_resolution || x.input_resolution || 0) / 10)},
         ]);
         drawChart(byId("chartLatency"), [
@@ -366,13 +417,16 @@ class LiveDashboardServer:
                 self.send_error(404)
 
             def _send_bytes(self, data: bytes, content_type: str) -> None:
-                self.send_response(200)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    return
 
             def _send_json(self, data: Any) -> None:
                 self._send_bytes(json.dumps(data).encode("utf-8"), "application/json")

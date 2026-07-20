@@ -10,6 +10,14 @@ runtime:
   default_inference_interval: 2
   default_cpu_threads: 3
   metrics_window_frames: 180
+  pre_run_warmup_enabled: true
+  pre_run_warmup_settle_sec: 2.0
+  pre_run_warmup_full_runs: 1
+  pre_run_warmup_roi_runs: 1
+  pre_run_warmup_resolution: 640
+  pre_run_warmup_threads: 4
+  pre_run_warmup_roi_resolution: 320
+  warmup_governor: performance
 
 thermal:
   normal_max_c: 58.0
@@ -32,6 +40,25 @@ thermal:
   preemptive_slope_c_per_min: 0.4
   balanced_interval_cap: 12
 
+fan:
+  enabled: true
+  enabled_strategies: ["scene_thermal_interval_lk", "scene_thermal_coadaptive"]
+  gpio_mode: BCM
+  pwm_pin: 18
+  pwm_frequency_hz: 1000
+  on_temp_c: 68.0
+  off_temp_c: 62.0
+  full_temp_c: 82.0
+  min_duty_cycle: 0.35
+  max_duty_cycle: 1.0
+  hold_low_on_close: true
+
+camera:
+  backend: csi
+  csi_width: 640
+  csi_height: 480
+  csi_framerate: 30
+
 inference:
   model_path: models/rtdetr_r18_lite_pi4_640.onnx
   model_paths_by_resolution:
@@ -40,6 +67,14 @@ inference:
     640: models/rtdetr_r18_lite_pi4_640.onnx
   enable_thread_sessions: false
   thread_session_counts: [1, 2, 3, 4]
+  inter_op_num_threads: 1
+  execution_mode: sequential
+  graph_optimization_level: all
+  enable_cpu_mem_arena: true
+  enable_mem_pattern: true
+  warmup_runs: 1
+  warmup_resolutions: [640, 320]
+  warmup_threads: [0]
 
 os_control:
   apply_runtime_actions: false

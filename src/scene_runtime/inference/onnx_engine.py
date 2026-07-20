@@ -30,6 +30,15 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         providers: list[str] | None = None,
         enable_thread_sessions: bool = False,
         thread_session_counts: list[int] | None = None,
+        warmup_runs: int = 0,
+        warmup_resolutions: list[int] | None = None,
+        warmup_threads: list[int] | None = None,
+        inter_op_num_threads: int = 1,
+        execution_mode: str = "sequential",
+        graph_optimization_level: str = "all",
+        enable_cpu_mem_arena: bool = True,
+        enable_mem_pattern: bool = True,
+        log_severity_level: int = 3,
     ) -> None:
         self._model_path = model_path
         self._model_paths_by_resolution = {
@@ -45,6 +54,23 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         self._sessions_by_resolution_threads: dict[int, dict[int, Any]] = {}
         self._enable_thread_sessions = enable_thread_sessions
         self._thread_session_counts = sorted(set(thread_session_counts or []))
+        self._warmup_runs = max(0, int(warmup_runs))
+        self._warmup_resolutions = (
+            [int(value) for value in warmup_resolutions]
+            if warmup_resolutions is not None
+            else None
+        )
+        self._warmup_threads = (
+            [int(value) for value in warmup_threads]
+            if warmup_threads is not None
+            else None
+        )
+        self._inter_op_num_threads = int(inter_op_num_threads)
+        self._execution_mode = str(execution_mode)
+        self._graph_optimization_level = str(graph_optimization_level)
+        self._enable_cpu_mem_arena = bool(enable_cpu_mem_arena)
+        self._enable_mem_pattern = bool(enable_mem_pattern)
+        self._log_severity_level = int(log_severity_level)
         self._input_names: list[str] = []
         self._output_names: list[str] = []
         self._input_names_by_resolution: dict[int, list[str]] = {}
@@ -57,6 +83,7 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         self._last_profile: dict[str, float] = {
             "preprocess_ms": 0.0,
             "build_feed_ms": 0.0,
+            "session_select_ms": 0.0,
             "onnx_run_ms": 0.0,
             "postprocess_ms": 0.0,
             "infer_total_ms": 0.0,
@@ -96,9 +123,10 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         self._ort = ort
 
         if self._model_paths_by_resolution:
-            first_resolution = sorted(self._model_paths_by_resolution)[0]
+            first_resolution = self._initial_resolution()
             first_thread = (self._thread_session_counts or [0])[0]
             self._session = self._get_resolution_session(first_resolution, first_thread)
+            self._warmup()
             return
 
         if self._enable_thread_sessions:
@@ -115,6 +143,7 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         self._input_names = [i.name for i in self._session.get_inputs()]
         self._output_names = [o.name for o in self._session.get_outputs()]
         self._fixed_input_size = self._read_fixed_input_size(self._session)
+        self._warmup()
 
     def _get_resolution_session(self, resolution: int, threads: int) -> Any:
         """Create or return a cached session for one resolution/thread pair."""
@@ -146,21 +175,91 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         self._fixed_input_size = self._fixed_input_sizes_by_resolution[resolution]
         return session
 
+    def _initial_resolution(self) -> int:
+        """Pick the first session to load without forcing unused low-res models."""
+        if not self._model_paths_by_resolution:
+            raise RuntimeError("No resolution-specific model paths configured")
+        if self._warmup_resolutions:
+            for resolution in self._warmup_resolutions:
+                if int(resolution) in self._model_paths_by_resolution:
+                    return int(resolution)
+        if self._model_path:
+            for resolution, path in self._model_paths_by_resolution.items():
+                if path == self._model_path:
+                    return int(resolution)
+        return max(self._model_paths_by_resolution)
+
     def _create_session(self, ort: Any, model_path: str, cpu_threads: int | None) -> Any:
         """Create one ONNX Runtime session, optionally pinning intra-op threads."""
-        if cpu_threads is None:
-            return ort.InferenceSession(
-                model_path,
-                providers=self._providers,
-            )
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = int(cpu_threads)
-        options.inter_op_num_threads = 1
+        options = self._create_session_options(ort, cpu_threads)
         return ort.InferenceSession(
             model_path,
             sess_options=options,
             providers=self._providers,
         )
+
+    def _create_session_options(self, ort: Any, cpu_threads: int | None) -> Any:
+        options = ort.SessionOptions()
+        if cpu_threads is not None:
+            options.intra_op_num_threads = int(cpu_threads)
+        if self._inter_op_num_threads > 0:
+            options.inter_op_num_threads = self._inter_op_num_threads
+        options.enable_cpu_mem_arena = self._enable_cpu_mem_arena
+        options.enable_mem_pattern = self._enable_mem_pattern
+        options.log_severity_level = self._log_severity_level
+        if self._execution_mode.lower() == "sequential" and hasattr(ort, "ExecutionMode"):
+            options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        elif self._execution_mode.lower() == "parallel" and hasattr(ort, "ExecutionMode"):
+            options.execution_mode = ort.ExecutionMode.ORT_PARALLEL
+        graph_level = self._graph_optimization_level.lower()
+        if hasattr(ort, "GraphOptimizationLevel"):
+            if graph_level in {"all", "enable_all"}:
+                options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            elif graph_level in {"extended", "enable_extended"}:
+                options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
+            elif graph_level in {"basic", "enable_basic"}:
+                options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+            elif graph_level in {"disable", "disabled", "none"}:
+                options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+        return options
+
+    def _warmup(self) -> None:
+        """Create selected sessions and run dummy inference before timing starts."""
+        if self._dry_run or self._warmup_runs <= 0:
+            return
+        resolutions = self._warmup_resolutions
+        if resolutions is None:
+            if self._model_paths_by_resolution:
+                resolutions = sorted(self._model_paths_by_resolution)
+            elif self._fixed_input_size is not None:
+                resolutions = [self._fixed_input_size]
+            else:
+                resolutions = [640]
+        threads = self._warmup_threads
+        if threads is None:
+            threads = self._thread_session_counts if self._enable_thread_sessions else [0]
+        if not threads:
+            threads = [0]
+
+        saved_profile = dict(self._last_profile)
+        saved_requested = self._last_requested_input_resolution
+        saved_resolved = self._last_resolved_input_resolution
+        for resolution in resolutions:
+            if self._model_paths_by_resolution and int(resolution) not in self._model_paths_by_resolution:
+                continue
+            frame = np.zeros((int(resolution), int(resolution), 3), dtype=np.uint8)
+            for threads_count in threads:
+                action = RuntimeAction(
+                    mode="onnx_warmup",
+                    input_resolution=int(resolution),
+                    inference_interval=1,
+                    cpu_threads=int(threads_count) if int(threads_count) > 0 else 1,
+                )
+                for _ in range(self._warmup_runs):
+                    self.infer(frame, action)
+        self._last_profile = saved_profile
+        self._last_requested_input_resolution = saved_requested
+        self._last_resolved_input_resolution = saved_resolved
 
     def _select_resolution(self, requested_resolution: int) -> int | None:
         """Select the nearest configured model resolution."""
@@ -271,6 +370,7 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         profile = {
             "preprocess_ms": 0.0,
             "build_feed_ms": 0.0,
+            "session_select_ms": 0.0,
             "onnx_run_ms": 0.0,
             "postprocess_ms": 0.0,
             "infer_total_ms": 0.0,
@@ -308,6 +408,9 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         if selected_resolution is not None:
             self._input_names = self._input_names_by_resolution[selected_resolution]
             self._output_names = self._output_names_by_resolution[selected_resolution]
+        profile["session_select_ms"] = (time.perf_counter() - t0) * 1000.0
+    
+        t0 = time.perf_counter()
         outputs = session.run(self._output_names, feeds)
         profile["onnx_run_ms"] = (time.perf_counter() - t0) * 1000.0
     

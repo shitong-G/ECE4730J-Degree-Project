@@ -11,6 +11,9 @@ def test_snapshot_keys() -> None:
     assert "temp_c" in snap
     assert "freq_mhz_avg" in snap
     assert "arm_clock_mhz" in snap
+    assert "arm_clock_stale" in snap
+    assert "firmware_poll_ms" in snap
+    assert "throttling_stale" in snap
     assert "thermal_state" in snap
     assert snap["thermal_state"] in ("normal", "warm", "hot", "critical", "unknown")
 
@@ -48,3 +51,11 @@ def test_throttling_dict() -> None:
     mon = DeviceStateMonitor()
     th = mon.read_throttling_state()
     assert isinstance(th, dict)
+    mon.close()
+
+
+def test_snapshot_starts_and_closes_background_firmware_monitor() -> None:
+    mon = DeviceStateMonitor()
+    snap = mon.snapshot({"thermal": {"firmware_poll_interval_sec": 0.1}})
+    assert "firmware_poll_ms" in snap
+    mon.close()

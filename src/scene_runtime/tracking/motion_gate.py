@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence
 
 import cv2
@@ -20,6 +20,7 @@ class MotionGateReport:
     largest_outside_component: int = 0
     should_refresh: bool = False
     reason: str = "no_gate_trigger"
+    roi_boxes_frame: list[np.ndarray] = field(default_factory=list)
 
 
 class ResidualMotionGate:
@@ -105,8 +106,21 @@ class ResidualMotionGate:
 
         residual_ratio = float(np.count_nonzero(residual) / max(1, residual.size))
         outside_ratio = float(np.count_nonzero(outside) / max(1, outside.size))
-        num_components, _, stats, _ = cv2.connectedComponentsWithStats(outside)
+        num_components, labels, stats, _ = cv2.connectedComponentsWithStats(outside)
         largest = int(stats[1:, cv2.CC_STAT_AREA].max()) if num_components > 1 else 0
+        largest_roi_boxes: list[np.ndarray] = []
+        if num_components > 1 and largest > 0:
+            largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+            x = float(stats[largest_label, cv2.CC_STAT_LEFT])
+            y = float(stats[largest_label, cv2.CC_STAT_TOP])
+            w = float(stats[largest_label, cv2.CC_STAT_WIDTH])
+            h = float(stats[largest_label, cv2.CC_STAT_HEIGHT])
+            largest_roi_boxes = [
+                np.asarray(
+                    [x / sx, y / sy, (x + w) / sx, (y + h) / sy],
+                    dtype=np.float32,
+                )
+            ]
 
         should_refresh = False
         reason = "no_gate_trigger"
@@ -128,6 +142,7 @@ class ResidualMotionGate:
             largest_outside_component=largest,
             should_refresh=should_refresh,
             reason=reason,
+            roi_boxes_frame=largest_roi_boxes if reason == "unexplained_motion_outside_tracks" else [],
         )
 
     def _global_affine(

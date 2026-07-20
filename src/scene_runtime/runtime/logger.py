@@ -23,19 +23,40 @@ LOG_COLUMNS = [
     "temp_c",
     "freq_mhz_avg",
     "arm_clock_mhz",
+    "arm_clock_stale",
+    "firmware_poll_ms",
     "power_w",
     "throttling_raw",
+    "throttling_stale",
     "under_voltage",
     "arm_freq_capped",
     "currently_throttled",
     "soft_temp_limit",
+    "under_voltage_occurred",
+    "arm_freq_capped_occurred",
+    "throttled_occurred",
+    "soft_temp_limit_occurred",
     "did_infer",
     "tracking_mode",
     "tracking_reason",
     "tracking_ms",
+    "tracking_track_count_before",
+    "tracking_track_count_after",
+    "tracking_failed_box_count",
     "tracking_failure_ratio",
     "tracking_mean_quality",
     "tracking_should_refresh",
+    "lk_quality_confirm_count",
+    "lk_quality_confirm_deferred",
+    "lk_quality_confirm_total_deferred",
+    "roi_refresh_candidate",
+    "roi_refresh_applied",
+    "roi_refresh_reason",
+    "roi_refresh_reject_reason",
+    "roi_refresh_area_ratio",
+    "roi_refresh_width_px",
+    "roi_refresh_height_px",
+    "roi_refresh_max_area_ratio",
     "latency_ms",
     "fps",
     "loop_fps",
@@ -56,6 +77,9 @@ LOG_COLUMNS = [
     "cpu_affinity_apply_error",
     "decoder_layers",
     "query_budget",
+    "fan_enabled",
+    "fan_duty_cycle",
+    "fan_mode",
     "detection_count",
     "confidence_mean",
 ]
@@ -79,19 +103,40 @@ class LogRecord:
     temp_c: float | None
     freq_mhz_avg: float | None
     arm_clock_mhz: float | None
+    arm_clock_stale: bool | None
+    firmware_poll_ms: float
     power_w: float | None
     throttling_raw: str | None
+    throttling_stale: bool | None
     under_voltage: bool | None
     arm_freq_capped: bool | None
     currently_throttled: bool | None
     soft_temp_limit: bool | None
+    under_voltage_occurred: bool | None
+    arm_freq_capped_occurred: bool | None
+    throttled_occurred: bool | None
+    soft_temp_limit_occurred: bool | None
     did_infer: bool
     tracking_mode: str | None
     tracking_reason: str | None
     tracking_ms: float
+    tracking_track_count_before: int
+    tracking_track_count_after: int
+    tracking_failed_box_count: int
     tracking_failure_ratio: float
     tracking_mean_quality: float
     tracking_should_refresh: bool | None
+    lk_quality_confirm_count: int
+    lk_quality_confirm_deferred: bool
+    lk_quality_confirm_total_deferred: int
+    roi_refresh_candidate: bool
+    roi_refresh_applied: bool
+    roi_refresh_reason: str | None
+    roi_refresh_reject_reason: str | None
+    roi_refresh_area_ratio: float
+    roi_refresh_width_px: float
+    roi_refresh_height_px: float
+    roi_refresh_max_area_ratio: float
     latency_ms: float
     fps: float
     loop_fps: float
@@ -112,6 +157,9 @@ class LogRecord:
     cpu_affinity_apply_error: str | None
     decoder_layers: int | None
     query_budget: int | None
+    fan_enabled: bool
+    fan_duty_cycle: float
+    fan_mode: str | None
     detection_count: int
     confidence_mean: float
 

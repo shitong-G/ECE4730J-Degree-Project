@@ -230,6 +230,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--video", type=Path, default=ROOT / "data" / "sample.mp4")
     parser.add_argument(
+        "--model",
+        type=Path,
+        default=None,
+        help=(
+            "Override inference.model_path, for example an INT8 ONNX model. "
+            "This also disables configured per-resolution model mappings so the "
+            "selected file is always the model that is loaded."
+        ),
+    )
+    parser.add_argument(
         "--camera",
         choices=["csi", "imx219-raw"],
         default=None,
@@ -359,6 +369,14 @@ def main() -> None:
         raise ValueError("--repeat-runs must be at least 1")
 
     config = load_config(args.config, args.strategy)
+    if args.model is not None:
+        if not args.model.exists():
+            raise FileNotFoundError(f"ONNX model does not exist: {args.model}")
+        inference_cfg = config.setdefault("inference", {})
+        inference_cfg["model_path"] = str(args.model)
+        # raspberry_pi4.yaml maps 640 to the original FP32 model.  Leaving that
+        # mapping in place would silently defeat --model for the common 640 case.
+        inference_cfg.pop("model_paths_by_resolution", None)
     if args.thermal_state is not None:
         config.setdefault("thermal", {})["override_state"] = args.thermal_state
     if args.thermal_temp_c is not None:
@@ -399,6 +417,8 @@ def main() -> None:
     print(f"  local/bind: {bind_url}")
     print(f"  LAN URL:    {lan_url}")
     print(f"  repeat:     {args.repeat_runs} run(s)")
+    if args.model is not None:
+        print(f"  model:      {args.model} (override; per-resolution mappings disabled)")
     if args.camera == "imx219-raw":
         interval = float(args.imx219_capture_interval_sec)
         capture_mode = (

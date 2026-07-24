@@ -204,7 +204,15 @@ def wait_for_normalised_temperature(args: argparse.Namespace) -> tuple[list[dict
                 print(f"[warn] {message}", flush=True)
                 return samples, None
 
-            if temp < lower and args.preheat_workers > 0 and not preheat_processes:
+            # A precondition cycle heats at most once.  Reheating after an
+            # overshoot creates a large thermal oscillation on fan-cooled
+            # devices and makes an equal-temperature start less likely.
+            if (
+                temp < lower
+                and args.preheat_workers > 0
+                and not preheat_processes
+                and not preheat_was_used
+            ):
                 preheat_processes = _start_preheat_workers(args.preheat_workers)
                 preheat_was_used = True
                 stable = 0
@@ -246,7 +254,11 @@ def wait_for_normalised_temperature(args: argparse.Namespace) -> tuple[list[dict
                     raise RuntimeError(message + " Refusing to start a non-comparable run.")
                 print(f"[warn] {message} Continuing by explicit override.", flush=True)
                 return samples, temp
-            time.sleep(max(1.0, args.poll_sec))
+            # Thermal inertia after stopping a CPU preheat is much faster than
+            # the normal 10 s polling cadence.  Sample at 1 Hz while passively
+            # cooling so the target window is not skipped between samples.
+            poll_interval = 1.0 if preheat_was_used else max(1.0, args.poll_sec)
+            time.sleep(poll_interval)
     finally:
         _stop_processes(preheat_processes)
 

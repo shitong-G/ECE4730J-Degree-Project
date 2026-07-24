@@ -131,6 +131,13 @@ class RuntimeLoop:
         self._pre_run_warmup_roi_resolution = int(
             runtime_cfg.get("pre_run_warmup_roi_resolution", 320)
         )
+        target = runtime_cfg.get("temperature_warmup_target_c")
+        self._temperature_warmup_target_c = (
+            float(target) if target is not None else None
+        )
+        self._temperature_warmup_max_sec = max(
+            0.0, float(runtime_cfg.get("temperature_warmup_max_sec", 0.0))
+        )
         self._strategy = strategy
         tracking_cfg = config.get("tracking", {})
         self._lk_tracking_enabled = bool(tracking_cfg.get("enable_lk_tracking", False))
@@ -285,6 +292,7 @@ class RuntimeLoop:
             return self._log_path
 
         self._run_pre_logging_warmup(first_frame)
+        self._run_temperature_warmup(first_frame)
 
         self._logger.open()
         self._profile_logger.open()
@@ -340,6 +348,56 @@ class RuntimeLoop:
         )
         for _ in range(roi_runs):
             self._engine.infer(roi_frame, roi_action)
+
+    def _run_temperature_warmup(self, frame: np.ndarray) -> None:
+        """Heat the active RT-DETR/ORT path until a controlled start temperature.
+
+        This executes before either CSV logger is opened, so warmup frames never
+        contaminate formal metrics.  It deliberately uses the current run's
+        model mapping and ONNX Runtime configuration rather than synthetic CPU
+        load, preserving the relevant thermal workload.
+        """
+        target = self._temperature_warmup_target_c
+        if target is None:
+            return
+        if self._temperature_warmup_max_sec <= 0:
+            raise ValueError("temperature_warmup_max_sec must be positive")
+
+        runtime_cfg = self._config.get("runtime", {})
+        action = RuntimeAction(
+            mode="temperature_warmup",
+            input_resolution=int(runtime_cfg.get("default_input_resolution", 640)),
+            inference_interval=1,
+            cpu_threads=int(runtime_cfg.get("default_cpu_threads", 4)),
+            governor=str(runtime_cfg.get("warmup_governor", "performance")),
+        )
+        self._action_applier.apply(action)
+        started = time.perf_counter()
+        warmup_frames = 0
+        while True:
+            # Always execute at least one inference.  This warms the selected
+            # model/session even when the cooling gate released at exactly the
+            # target temperature.
+            self._engine.infer(frame, action)
+            warmup_frames += 1
+            device_state = self._device.snapshot(self._config)
+            temp_c = device_state.get("temp_c")
+            try:
+                temperature = float(temp_c)
+            except (TypeError, ValueError):
+                raise RuntimeError("CPU temperature is unavailable during RT-DETR warmup")
+            if temperature >= target:
+                print(
+                    f"RT-DETR temperature warmup complete: {temperature:.2f}C "
+                    f">= {target:.2f}C after {warmup_frames} inference frame(s).",
+                    flush=True,
+                )
+                return
+            if time.perf_counter() - started >= self._temperature_warmup_max_sec:
+                raise TimeoutError(
+                    f"RT-DETR temperature warmup did not reach {target:.2f}C "
+                    f"within {self._temperature_warmup_max_sec:.0f}s; last={temperature:.2f}C"
+                )
 
     @staticmethod
     def _center_crop_for_warmup(frame: np.ndarray) -> np.ndarray:

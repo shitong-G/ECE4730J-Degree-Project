@@ -84,6 +84,21 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--dry-run", action="store_true", help="Simulate inference without ONNX model")
     p.add_argument("--duration-min", type=float, default=15.0)
+    p.add_argument(
+        "--warmup-until-temp-c",
+        type=float,
+        default=None,
+        help=(
+            "Before opening experiment logs, repeatedly run real RT-DETR inference "
+            "until this CPU temperature is reached."
+        ),
+    )
+    p.add_argument(
+        "--warmup-max-sec",
+        type=float,
+        default=900.0,
+        help="Fail the temperature-driven RT-DETR warmup after this many seconds.",
+    )
     p.add_argument("--output", type=Path, default=None, help="CSV log output path")
     p.add_argument(
         "--log-detections",
@@ -176,6 +191,12 @@ def main() -> None:
             default_resolution,
             model_map[max(model_map)],
         )
+    if args.warmup_until_temp_c is not None:
+        if args.warmup_max_sec <= 0:
+            raise ValueError("--warmup-max-sec must be positive")
+        runtime_cfg = config.setdefault("runtime", {})
+        runtime_cfg["temperature_warmup_target_c"] = float(args.warmup_until_temp_c)
+        runtime_cfg["temperature_warmup_max_sec"] = float(args.warmup_max_sec)
     if args.thermal_state is not None:
         config.setdefault("thermal", {})["override_state"] = args.thermal_state
     if args.thermal_temp_c is not None:

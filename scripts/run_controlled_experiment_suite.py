@@ -81,12 +81,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--strategies", default=",".join(DEFAULT_STRATEGIES))
     parser.add_argument("--run-id", default=datetime.now().strftime("controlled_%Y%m%d_%H%M%S"))
     parser.add_argument("--output-dir", type=Path, default=ROOT / "experiments" / "controlled_suite")
-    parser.add_argument("--start-temp-c", type=float, required=True)
+    parser.add_argument("--start-temp-c", type=float, default=None)
     parser.add_argument("--temp-tolerance-c", type=float, default=0.5)
     parser.add_argument("--stable-samples", type=int, default=5)
     parser.add_argument("--poll-sec", type=float, default=10.0)
     parser.add_argument("--max-wait-min", type=float, default=90.0)
     parser.add_argument("--temperature-trace-sec", type=float, default=1.0)
+    parser.add_argument(
+        "--detr-warmup-temp-c",
+        type=float,
+        default=50.0,
+        help=(
+            "Run real RT-DETR inference in the child process until this temperature, "
+            "then begin formal logging. Set to none is not supported by CLI; use 0 to disable."
+        ),
+    )
+    parser.add_argument("--detr-warmup-max-sec", type=float, default=900.0)
     parser.add_argument(
         "--preheat-workers",
         type=int,
@@ -292,6 +302,11 @@ def build_command(
         cmd.append("--enable-thread-sessions")
     if args.thread_session_counts:
         cmd.extend(["--thread-session-counts", args.thread_session_counts])
+    if args.detr_warmup_temp_c > 0:
+        cmd.extend([
+            "--warmup-until-temp-c", str(args.detr_warmup_temp_c),
+            "--warmup-max-sec", str(args.detr_warmup_max_sec),
+        ])
     if use_optimized_models:
         cmd.extend([
             "--model-paths-by-resolution",
@@ -335,12 +350,41 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def wait_until_cool_enough(args: argparse.Namespace) -> tuple[list[dict[str, Any]], float | None]:
+    """Wait only for cooling; the child then heats with real RT-DETR inference."""
+    target = float(args.detr_warmup_temp_c)
+    deadline = time.monotonic() + args.max_wait_min * 60.0
+    samples: list[dict[str, Any]] = []
+    while True:
+        temp = cpu_temp_c()
+        samples.append({
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "temp_c": temp,
+            "phase": "cool_before_detr_warmup",
+        })
+        if temp is not None and temp <= target:
+            return samples, temp
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"CPU did not cool to <= {target:.2f}C before RT-DETR warmup."
+            )
+        current = f"{temp:.2f}C" if temp is not None else "unavailable"
+        print(f"Waiting to cool before RT-DETR warmup: {current} > {target:.2f}C", flush=True)
+        time.sleep(max(1.0, args.poll_sec))
+
+
 def main() -> None:
     args = parse_args()
     if args.duration_min <= 0 or args.stable_samples < 1 or args.temp_tolerance_c < 0:
         raise ValueError("duration, stable-samples, and temp-tolerance must be positive")
     if args.preheat_workers < 0:
         raise ValueError("--preheat-workers cannot be negative")
+    if args.detr_warmup_temp_c < 0 or args.detr_warmup_max_sec <= 0:
+        raise ValueError("RT-DETR warmup temperature must be non-negative and max time positive")
+    if args.detr_warmup_temp_c > 0 and args.preheat_workers:
+        raise ValueError("Use either --detr-warmup-temp-c or --preheat-workers, not both")
+    if args.detr_warmup_temp_c <= 0 and args.start_temp_c is None:
+        raise ValueError("--start-temp-c is required when RT-DETR warmup is disabled")
     optimized_models = (
         args.optimized_model_320,
         args.optimized_model_480,
@@ -396,7 +440,11 @@ def main() -> None:
         run_dir = suite_dir / label
         run_dir.mkdir()
         output = run_dir / "runtime.csv"
-        conditioning, start_temp = wait_for_normalised_temperature(args)
+        conditioning, start_temp = (
+            wait_until_cool_enough(args)
+            if args.detr_warmup_temp_c > 0
+            else wait_for_normalised_temperature(args)
+        )
         write_json(run_dir / "precondition_temperature.json", conditioning)
         # The first native RT-DETR run is the FP32 baseline.  Every following
         # strategy uses precisely the same 320/480/640 optimized model family.

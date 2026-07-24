@@ -1,0 +1,12 @@
+# Raspberry Pi 4 profile using L1 20% structured-pruned RT-DETRv2 R18-lite ONNX.
+# Models live under models/ (FP32 pruned; optional INT8 siblings with _int8 suffix).
+extends: raspberry_pi4.yaml
+
+inference:
+  model_path: models/rtdetr_r18_lite_l1_r20_640.onnx
+  model_paths_by_resolution:
+    320: models/rtdetr_r18_lite_l1_r20_320.onnx
+    480: models/rtdetr_r18_lite_l1_r20_480.onnx
+    640: models/rtdetr_r18_lite_l1_r20_640.onnx
+  enable_thread_sessions: false
+  thread_session_counts: [1, 2, 3, 4]

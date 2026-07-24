@@ -42,6 +42,24 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--video", type=Path, default=None, help="Video path or omit for synthetic")
     p.add_argument(
+        "--model",
+        type=Path,
+        default=None,
+        help=(
+            "Override inference.model_path and disable configured per-resolution "
+            "mappings, ensuring this exact ONNX model is used."
+        ),
+    )
+    p.add_argument(
+        "--model-paths-by-resolution",
+        default=None,
+        help=(
+            "Override the resolution-to-ONNX mapping as "
+            "'320=path320.onnx,480=path480.onnx,640=path640.onnx'. "
+            "Use this for a matched family of pruned/quantized models."
+        ),
+    )
+    p.add_argument(
         "--camera",
         choices=["csi"],
         default=None,
@@ -126,6 +144,38 @@ def main() -> None:
         raise ValueError("--frame-width and --frame-height must be set together")
 
     config = load_config(args.config, args.strategy)
+    if args.model is not None and args.model_paths_by_resolution is not None:
+        raise ValueError("--model and --model-paths-by-resolution are mutually exclusive")
+    if args.model is not None:
+        if not args.model.exists():
+            raise FileNotFoundError(f"ONNX model does not exist: {args.model}")
+        inference_cfg = config.setdefault("inference", {})
+        inference_cfg["model_path"] = str(args.model)
+        inference_cfg.pop("model_paths_by_resolution", None)
+    if args.model_paths_by_resolution is not None:
+        model_map: dict[int, str] = {}
+        for item in args.model_paths_by_resolution.split(","):
+            resolution_text, separator, path_text = item.strip().partition("=")
+            if not separator or not resolution_text or not path_text:
+                raise ValueError(
+                    "--model-paths-by-resolution entries must be RESOLUTION=PATH"
+                )
+            resolution = int(resolution_text)
+            model_path = Path(path_text)
+            if resolution <= 0 or not model_path.exists():
+                raise FileNotFoundError(
+                    f"Invalid model mapping {item!r}; model must exist and resolution must be positive"
+                )
+            model_map[resolution] = str(model_path)
+        if not model_map:
+            raise ValueError("--model-paths-by-resolution cannot be empty")
+        inference_cfg = config.setdefault("inference", {})
+        inference_cfg["model_paths_by_resolution"] = model_map
+        default_resolution = int(config.get("runtime", {}).get("default_input_resolution", 640))
+        inference_cfg["model_path"] = model_map.get(
+            default_resolution,
+            model_map[max(model_map)],
+        )
     if args.thermal_state is not None:
         config.setdefault("thermal", {})["override_state"] = args.thermal_state
     if args.thermal_temp_c is not None:

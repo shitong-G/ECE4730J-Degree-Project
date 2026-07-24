@@ -88,6 +88,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-wait-min", type=float, default=90.0)
     parser.add_argument("--temperature-trace-sec", type=float, default=1.0)
     parser.add_argument(
+        "--preheat-workers",
+        type=int,
+        default=0,
+        help=(
+            "CPU worker processes used only when the device starts below the lower "
+            "temperature bound.  They stop at the upper bound, then the suite waits "
+            "for passive cooling into the stable target window.  0 disables preheating."
+        ),
+    )
+    parser.add_argument(
         "--allow-temperature-timeout",
         action="store_true",
         help="Continue after a normalisation timeout (not recommended for a comparative experiment).",
@@ -148,39 +158,97 @@ def system_snapshot() -> dict[str, Any]:
     }
 
 
+def _start_preheat_workers(count: int) -> list[subprocess.Popen[Any]]:
+    """Start bounded local CPU load processes; caller must always terminate them."""
+    worker_code = "while True: x = 1234567 * 7654321"
+    return [
+        subprocess.Popen([sys.executable, "-c", worker_code])
+        for _ in range(max(0, int(count)))
+    ]
+
+
+def _stop_processes(processes: list[subprocess.Popen[Any]]) -> None:
+    for process in processes:
+        if process.poll() is None:
+            process.terminate()
+    for process in processes:
+        try:
+            process.wait(timeout=3.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
 def wait_for_normalised_temperature(args: argparse.Namespace) -> tuple[list[dict[str, Any]], float | None]:
     """Require N consecutive readings inside the target temperature window."""
     samples: list[dict[str, Any]] = []
     stable = 0
     deadline = time.monotonic() + args.max_wait_min * 60.0
-    while True:
-        temp = cpu_temp_c()
-        sample = {"timestamp_utc": datetime.now(timezone.utc).isoformat(), "temp_c": temp}
-        samples.append(sample)
-        if temp is None:
-            message = "CPU temperature is unavailable; cannot normalise experimental start state."
-            if not args.allow_temperature_timeout:
-                raise RuntimeError(message)
-            print(f"[warn] {message}", flush=True)
-            return samples, None
+    preheat_processes: list[subprocess.Popen[Any]] = []
+    preheat_was_used = False
+    lower = args.start_temp_c - args.temp_tolerance_c
+    upper = args.start_temp_c + args.temp_tolerance_c
+    try:
+        while True:
+            temp = cpu_temp_c()
+            sample = {
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "temp_c": temp,
+                "phase": "preheat" if preheat_processes else "stabilise",
+            }
+            samples.append(sample)
+            if temp is None:
+                message = "CPU temperature is unavailable; cannot normalise experimental start state."
+                if not args.allow_temperature_timeout:
+                    raise RuntimeError(message)
+                print(f"[warn] {message}", flush=True)
+                return samples, None
 
-        within = abs(temp - args.start_temp_c) <= args.temp_tolerance_c
-        stable = stable + 1 if within else 0
-        print(
-            f"Temperature conditioning: {temp:.2f}C; target "
-            f"{args.start_temp_c:.2f}±{args.temp_tolerance_c:.2f}C; "
-            f"stable samples {stable}/{args.stable_samples}",
-            flush=True,
-        )
-        if stable >= args.stable_samples:
-            return samples, temp
-        if time.monotonic() >= deadline:
-            message = "Temperature normalisation timed out."
-            if not args.allow_temperature_timeout:
-                raise RuntimeError(message + " Refusing to start a non-comparable run.")
-            print(f"[warn] {message} Continuing by explicit override.", flush=True)
-            return samples, temp
-        time.sleep(max(1.0, args.poll_sec))
+            if temp < lower and args.preheat_workers > 0 and not preheat_processes:
+                preheat_processes = _start_preheat_workers(args.preheat_workers)
+                preheat_was_used = True
+                stable = 0
+                print(
+                    f"Preheating with {args.preheat_workers} worker(s): {temp:.2f}C < {lower:.2f}C",
+                    flush=True,
+                )
+
+            # Stop at the upper boundary so the timed run begins during passive
+            # cooling, not while an artificial workload is still active.
+            if preheat_processes and temp >= upper:
+                _stop_processes(preheat_processes)
+                preheat_processes = []
+                stable = 0
+                print(
+                    f"Preheat complete at {temp:.2f}C; waiting for passive stabilisation.",
+                    flush=True,
+                )
+
+            within = lower <= temp <= upper and not preheat_processes
+            stable = stable + 1 if within else 0
+            print(
+                f"Temperature conditioning: {temp:.2f}C; target "
+                f"{args.start_temp_c:.2f}±{args.temp_tolerance_c:.2f}C; "
+                f"stable samples {stable}/{args.stable_samples}",
+                flush=True,
+            )
+            if stable >= args.stable_samples:
+                if preheat_was_used:
+                    samples.append({
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "temp_c": temp,
+                        "phase": "preheat_then_stable",
+                    })
+                return samples, temp
+            if time.monotonic() >= deadline:
+                message = "Temperature normalisation timed out."
+                if not args.allow_temperature_timeout:
+                    raise RuntimeError(message + " Refusing to start a non-comparable run.")
+                print(f"[warn] {message} Continuing by explicit override.", flush=True)
+                return samples, temp
+            time.sleep(max(1.0, args.poll_sec))
+    finally:
+        _stop_processes(preheat_processes)
 
 
 def build_command(
@@ -259,6 +327,8 @@ def main() -> None:
     args = parse_args()
     if args.duration_min <= 0 or args.stable_samples < 1 or args.temp_tolerance_c < 0:
         raise ValueError("duration, stable-samples, and temp-tolerance must be positive")
+    if args.preheat_workers < 0:
+        raise ValueError("--preheat-workers cannot be negative")
     optimized_models = (
         args.optimized_model_320,
         args.optimized_model_480,

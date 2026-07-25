@@ -60,22 +60,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", type=Path, default=None, help="Optional single ONNX model override.")
     parser.add_argument(
-        "--optimized-model-320",
+        "--quantized-model-320", "--optimized-model-320",
+        dest="optimized_model_320",
         type=Path,
         default=None,
-        help="Pruned/quantized ONNX model used at 320 for every non-baseline strategy.",
+        help="Quantization-only ONNX model used at 320 for every non-baseline strategy.",
     )
     parser.add_argument(
-        "--optimized-model-480",
+        "--quantized-model-480", "--optimized-model-480",
+        dest="optimized_model_480",
         type=Path,
         default=None,
-        help="Pruned/quantized ONNX model used at 480 for every non-baseline strategy.",
+        help="Quantization-only ONNX model used at 480 for every non-baseline strategy.",
     )
     parser.add_argument(
-        "--optimized-model-640",
+        "--quantized-model-640", "--optimized-model-640",
+        dest="optimized_model_640",
         type=Path,
         default=None,
-        help="Pruned/quantized ONNX model used at 640 for every non-baseline strategy.",
+        help="Quantization-only ONNX model used at 640 for every non-baseline strategy.",
     )
     parser.add_argument("--duration-min", type=float, default=20.0)
     parser.add_argument("--strategies", default=",".join(DEFAULT_STRATEGIES))
@@ -117,6 +120,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--apply-runtime-actions", action="store_true")
     parser.add_argument("--enable-thread-sessions", action="store_true")
     parser.add_argument("--thread-session-counts", default=None)
+    parser.add_argument(
+        "--fan-preflight",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Require a real GPIO PWM fan test before the suite starts (default: enabled).",
+    )
     return parser.parse_args()
 
 
@@ -350,6 +359,34 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def verify_fan_hardware(args: argparse.Namespace, suite_dir: Path) -> None:
+    """Fail before the suite if fan control would degrade to ``pwm_no_gpio``."""
+    if not args.fan_preflight:
+        return
+    command = [
+        sys.executable,
+        str(ROOT / "scripts" / "test_fan_gpio.py"),
+        "--config", str(args.config),
+        "--strategy", "native_rtdetr",
+        "--duty", "1.0",
+        "--seconds", "1.0",
+    ]
+    completed = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+    result = {
+        "command": command,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+    }
+    write_json(suite_dir / "fan_preflight.json", result)
+    if completed.returncode != 0 or "mode=pwm " not in completed.stdout:
+        raise RuntimeError(
+            "Fan preflight failed: real GPIO PWM was not applied. Fix RPi.GPIO/lgpio "
+            "permissions, daemon, wiring, or pin configuration before this thermal suite. "
+            "See fan_preflight.json for the exact error."
+        )
+
+
 def wait_until_cool_enough(args: argparse.Namespace) -> tuple[list[dict[str, Any]], float | None]:
     """Wait only for cooling; the child then heats with real RT-DETR inference."""
     target = float(args.detr_warmup_temp_c)
@@ -434,6 +471,7 @@ def main() -> None:
         "runs": [],
     }
     write_json(suite_dir / "manifest.json", manifest)
+    verify_fan_hardware(args, suite_dir)
 
     for index, strategy in enumerate(strategies, start=1):
         label = f"{index:02d}_{strategy}"
@@ -458,7 +496,7 @@ def main() -> None:
         run_meta: dict[str, Any] = {
             "strategy": strategy,
             "model_condition": (
-                "optimized_pruned_int8" if use_optimized_models
+                "quantization_only_int8" if use_optimized_models
                 else "native_fp32_baseline" if bool(optimized_models[0])
                 else "single_model_override" if args.model is not None
                 else "config_default"

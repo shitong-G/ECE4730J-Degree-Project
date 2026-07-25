@@ -42,13 +42,15 @@ thermal:
 
 fan:
   enabled: true
-  enabled_strategies: ["scene_thermal_interval_lk", "scene_thermal_coadaptive"]
+  # Identical active cooling for every compared strategy prevents the fan
+  # configuration itself from becoming a confounding experimental variable.
+  enabled_strategies: ["*"]
   gpio_mode: BCM
   pwm_pin: 18
   pwm_frequency_hz: 1000
-  on_temp_c: 68.0
-  off_temp_c: 62.0
-  full_temp_c: 82.0
+  on_temp_c: 60.0
+  off_temp_c: 55.0
+  full_temp_c: 75.0
   min_duty_cycle: 0.35
   max_duty_cycle: 1.0
   hold_low_on_close: true

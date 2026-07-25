@@ -24,7 +24,7 @@ class PwmFanController:
         self._enabled = bool(cfg.get("enabled", False))
         enabled_strategies = cfg.get("enabled_strategies", ["scene_thermal_coadaptive"])
         strategy = str(config.get("project", {}).get("strategy", "default"))
-        if enabled_strategies and strategy not in enabled_strategies:
+        if enabled_strategies and "*" not in enabled_strategies and strategy not in enabled_strategies:
             self._enabled = False
 
         thermal = config.get("thermal", {})

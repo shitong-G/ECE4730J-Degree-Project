@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate resolution-quality trade-off using 640 detections as pseudo labels."""
+"""Evaluate model quality using native 640 RT-DETR detections as pseudo labels."""
 
 from __future__ import annotations
 
@@ -27,6 +27,19 @@ def parse_args() -> argparse.Namespace:
         default="models/rtdetr_r18_lite_pi4_{resolution}.onnx",
         help="Model path template with {resolution}",
     )
+    parser.add_argument(
+        "--teacher-model",
+        type=Path,
+        default=None,
+        help="Native 640 teacher ONNX. Defaults to --model-template at --teacher-resolution.",
+    )
+    parser.add_argument(
+        "--student-models",
+        nargs="*",
+        default=[],
+        metavar="RESOLUTION=PATH",
+        help="Explicit student ONNX files, for example 320=models/a.onnx 480=models/b.onnx.",
+    )
     parser.add_argument("--teacher-resolution", type=int, default=640)
     parser.add_argument("--student-resolutions", default="480,320")
     parser.add_argument("--threads", type=int, default=4)
@@ -44,6 +57,20 @@ def parse_args() -> argparse.Namespace:
 
 def _parse_ints(text: str) -> list[int]:
     return [int(item.strip()) for item in text.split(",") if item.strip()]
+
+
+def _parse_model_map(entries: list[str]) -> dict[int, Path]:
+    models: dict[int, Path] = {}
+    for entry in entries:
+        resolution_text, sep, path_text = entry.partition("=")
+        if not sep:
+            raise ValueError("--student-models entries must be RESOLUTION=PATH")
+        resolution = int(resolution_text.strip())
+        path = Path(path_text.strip())
+        if not path.exists():
+            raise FileNotFoundError(f"Student model does not exist: {path}")
+        models[resolution] = path
+    return models
 
 
 def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
@@ -112,9 +139,9 @@ def _load_frames(video: Path, max_frames: int, stride: int) -> list:
     return frames
 
 
-def _create_engine(model_template: str, resolution: int, threads: int) -> ONNXRTDETREngine:
+def _create_engine(model_path: Path | str, resolution: int, threads: int) -> ONNXRTDETREngine:
     engine = ONNXRTDETREngine(
-        model_path=model_template.format(resolution=resolution),
+        model_path=model_path,
         dry_run=False,
         enable_thread_sessions=True,
         thread_session_counts=[threads],
@@ -152,16 +179,52 @@ def _safe_mean(values: list[float]) -> float:
     return mean(values) if values else 0.0
 
 
+def _plot_summary(rows: list[dict[str, object]], output_path: Path) -> None:
+    """Plot pseudo-label agreement; this is not ground-truth accuracy or mAP."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    students = [row for row in rows if row["role"] == "student"]
+    labels = [str(row["resolution"]) for row in students]
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2), constrained_layout=True)
+    metrics = ["pseudo_recall", "precision_proxy", "mean_matched_iou"]
+    x = list(range(len(students)))
+    width = 0.24
+    for index, metric in enumerate(metrics):
+        axes[0].bar(
+            [value + (index - 1) * width for value in x],
+            [float(row[metric]) for row in students],
+            width=width,
+            label=metric.replace("_", " "),
+        )
+    axes[0].set_xticks(x, labels)
+    axes[0].set_ylim(0.0, 1.0)
+    axes[0].set_xlabel("Student input resolution")
+    axes[0].set_ylabel("Agreement with native-640 teacher")
+    axes[0].set_title("Pseudo-label quality (IoU ≥ 0.5)")
+    axes[0].legend(fontsize=8)
+
+    axes[1].bar(labels, [float(row["mean_latency_ms"]) for row in students], color="#4472C4")
+    axes[1].set_xlabel("Student input resolution")
+    axes[1].set_ylabel("Mean inference latency (ms)")
+    axes[1].set_title("WSL CPU inference latency (non-Pi reference)")
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
 def main() -> None:
     args = parse_args()
-    students = _parse_ints(args.student_resolutions)
+    model_map = _parse_model_map(args.student_models)
+    students = sorted(model_map) if model_map else _parse_ints(args.student_resolutions)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     frames = _load_frames(args.video, args.max_frames, args.frame_stride)
     if not frames:
         raise RuntimeError(f"No frames loaded from {args.video}")
 
     teacher_engine = _create_engine(
-        args.model_template,
+        args.teacher_model or args.model_template.format(resolution=args.teacher_resolution),
         args.teacher_resolution,
         args.threads,
     )
@@ -195,7 +258,11 @@ def main() -> None:
     )
 
     for resolution in students:
-        student_engine = _create_engine(args.model_template, resolution, args.threads)
+        student_engine = _create_engine(
+            model_map.get(resolution, Path(args.model_template.format(resolution=resolution))),
+            resolution,
+            args.threads,
+        )
         student_dets, student_lat = _infer_all(
             student_engine,
             frames,
@@ -283,8 +350,12 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(match_rows)
 
+    plot_path = args.output_dir / "resolution_quality_comparison.png"
+    _plot_summary(summary_rows, plot_path)
+
     print(f"Saved summary: {summary_path}")
     print(f"Saved matches: {matches_path}")
+    print(f"Saved plot: {plot_path}")
     for row in summary_rows:
         print(row)
 

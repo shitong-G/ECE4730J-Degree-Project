@@ -18,6 +18,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--students", nargs="+", type=Path, required=True, help="Student *_detections.jsonl files")
     parser.add_argument("--teacher-csv", type=Path, default=None, help="Optional native runtime CSV")
     parser.add_argument("--student-csvs", nargs="*", type=Path, default=[], help="Optional student runtime CSV files")
+    parser.add_argument(
+        "--teacher-cycle-frames",
+        type=int,
+        default=0,
+        help=(
+            "Map each student frame ID to frame_id %% N in the teacher log. "
+            "Use this for a deterministically looped video whose teacher log contains one full cycle."
+        ),
+    )
     parser.add_argument("--iou-threshold", type=float, default=0.5)
     parser.add_argument(
         "--output",
@@ -28,6 +37,12 @@ def parse_args() -> argparse.Namespace:
         "--matches-output",
         type=Path,
         default=Path("experiments/results/strategy_detection_quality_frames.csv"),
+    )
+    parser.add_argument(
+        "--plot-output",
+        type=Path,
+        default=None,
+        help="Optional PNG overview of pseudo-label agreement for every strategy.",
     )
     return parser.parse_args()
 
@@ -186,8 +201,21 @@ def _compare_one(
     student_path: Path,
     csv_rows: list[dict[str, str]],
     iou_threshold: float,
+    teacher_cycle_frames: int,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    common_ids = sorted(set(teacher) & set(student))
+    if teacher_cycle_frames > 0:
+        missing = [frame_id for frame_id in range(teacher_cycle_frames) if frame_id not in teacher]
+        if missing:
+            raise ValueError(
+                "Teacher cycle is incomplete: missing teacher frame IDs "
+                f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
+            )
+        aligned_ids = [
+            (frame_id, frame_id % teacher_cycle_frames)
+            for frame_id in sorted(student)
+        ]
+    else:
+        aligned_ids = [(frame_id, frame_id) for frame_id in sorted(set(teacher) & set(student))]
     total_teacher = total_student = total_matches = 0
     infer_teacher = infer_student = infer_matches = 0
     noninfer_teacher = noninfer_student = noninfer_matches = 0
@@ -195,8 +223,8 @@ def _compare_one(
     center_errors: list[float] = []
     frame_rows: list[dict[str, Any]] = []
 
-    for frame_id in common_ids:
-        trow = teacher[frame_id]
+    for frame_id, teacher_frame_id in aligned_ids:
+        trow = teacher[teacher_frame_id]
         srow = student[frame_id]
         matches, frame_ious, frame_center_errors = _match(trow, srow, iou_threshold)
         teacher_count = len(trow.get("detections") or [])
@@ -217,8 +245,9 @@ def _compare_one(
             noninfer_matches += matches
         frame_rows.append(
             {
-                "student": student_path.stem,
+                "student": student_path.parent.name,
                 "frame_id": frame_id,
+                "teacher_frame_id": teacher_frame_id,
                 "did_infer": did_infer,
                 "tracking_mode": srow.get("tracking_mode"),
                 "teacher_count": teacher_count,
@@ -232,9 +261,9 @@ def _compare_one(
         )
 
     summary: dict[str, Any] = {
-        "student": student_path.stem,
+        "student": student_path.parent.name,
         "strategy": next(iter(student.values())).get("strategy") if student else None,
-        "common_frames": len(common_ids),
+        "common_frames": len(aligned_ids),
         "teacher_frames": len(teacher),
         "student_frames": len(student),
         "pseudo_recall": total_matches / total_teacher if total_teacher else 1.0,
@@ -251,23 +280,73 @@ def _compare_one(
     return summary, frame_rows
 
 
+def _plot_summary(rows: list[dict[str, Any]], output_path: Path) -> None:
+    """Plot teacher-agreement metrics, not ground-truth accuracy or mAP."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    labels = [str(row["strategy"] or row["student"]) for row in rows]
+    positions = list(range(len(rows)))
+    fig, axes = plt.subplots(1, 2, figsize=(16, 5.5), constrained_layout=True)
+    width = 0.25
+    metrics = [
+        ("pseudo_recall", "All-frame pseudo recall"),
+        ("precision_proxy", "All-frame precision proxy"),
+        ("mean_matched_iou", "Mean matched IoU"),
+    ]
+    for metric_index, (metric, label) in enumerate(metrics):
+        axes[0].bar(
+            [position + (metric_index - 1) * width for position in positions],
+            [float(row[metric]) for row in rows],
+            width=width,
+            label=label,
+        )
+    axes[0].set_ylim(0.0, 1.0)
+    axes[0].set_xticks(positions, labels, rotation=55, ha="right")
+    axes[0].set_ylabel("Agreement with native-640 teacher")
+    axes[0].set_title("End-to-end output quality (including LK / skipped frames)")
+    axes[0].legend(fontsize=8)
+
+    detector_metrics = [
+        ("infer_frame_pseudo_recall", "Detector-frame pseudo recall"),
+        ("infer_frame_precision_proxy", "Detector-frame precision proxy"),
+    ]
+    for metric_index, (metric, label) in enumerate(detector_metrics):
+        axes[1].bar(
+            [position + (metric_index - 0.5) * 0.36 for position in positions],
+            [float(row[metric]) for row in rows],
+            width=0.36,
+            label=label,
+        )
+    axes[1].set_ylim(0.0, 1.0)
+    axes[1].set_xticks(positions, labels, rotation=55, ha="right")
+    axes[1].set_ylabel("Agreement with native-640 teacher")
+    axes[1].set_title("Detector-only quality (excludes LK / skipped frames)")
+    axes[1].legend(fontsize=8)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
 def main() -> None:
     args = parse_args()
     teacher = _load_jsonl(args.teacher)
-    csv_by_stem = {path.stem: _load_csv(path) for path in args.student_csvs}
+    if args.student_csvs and len(args.student_csvs) != len(args.students):
+        raise ValueError("--student-csvs must provide one CSV for every --students entry")
     summaries: list[dict[str, Any]] = []
     frame_rows: list[dict[str, Any]] = []
-    for student_path in args.students:
+    for index, student_path in enumerate(args.students):
         student = _load_jsonl(student_path)
-        csv_rows = csv_by_stem.get(student_path.stem.replace("_detections", ""))
-        if csv_rows is None:
-            csv_rows = csv_by_stem.get(student_path.stem, [])
+        csv_rows = _load_csv(args.student_csvs[index]) if args.student_csvs else []
         summary, rows = _compare_one(
             teacher=teacher,
             student=student,
             student_path=student_path,
             csv_rows=csv_rows,
             iou_threshold=args.iou_threshold,
+            teacher_cycle_frames=max(0, args.teacher_cycle_frames),
         )
         summaries.append(summary)
         frame_rows.extend(rows)
@@ -281,8 +360,12 @@ def main() -> None:
         writer = csv.DictWriter(handle, fieldnames=list(frame_rows[0].keys()))
         writer.writeheader()
         writer.writerows(frame_rows)
+    if args.plot_output is not None:
+        _plot_summary(summaries, args.plot_output)
     print(f"Saved summary: {args.output}")
     print(f"Saved per-frame details: {args.matches_output}")
+    if args.plot_output is not None:
+        print(f"Saved plot: {args.plot_output}")
     for row in summaries:
         print(row)
 

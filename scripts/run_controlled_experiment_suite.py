@@ -338,6 +338,10 @@ def run_with_temperature_trace(cmd: list[str], trace_path: Path, interval_sec: f
         writer.writeheader()
         started = time.monotonic()
         process = subprocess.Popen(cmd, cwd=ROOT)
+        print(
+            f"[suite] child started: pid={process.pid}; thermal trace={trace_path}",
+            flush=True,
+        )
         while process.poll() is None:
             writer.writerow({
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -493,14 +497,25 @@ def main() -> None:
             output,
             use_optimized_models=use_optimized_models,
         )
+        model_condition = (
+            "quantization_only_int8" if use_optimized_models
+            else "native_fp32_baseline" if bool(optimized_models[0])
+            else "single_model_override" if args.model is not None
+            else "config_default"
+        )
+        fan_expected = strategy in {"scene_thermal_coadaptive", "scene_thermal_interval_lk"}
+        start_text = f"{start_temp:.2f}C" if start_temp is not None else "unavailable"
+        print(
+            f"\n[suite] starting {index}/{len(strategies)}: {strategy}\n"
+            f"  model condition: {model_condition}\n"
+            f"  start temperature: {start_text}\n"
+            f"  PWM fan expected: {'yes' if fan_expected else 'no'}\n"
+            f"  output directory: {run_dir}",
+            flush=True,
+        )
         run_meta: dict[str, Any] = {
             "strategy": strategy,
-            "model_condition": (
-                "quantization_only_int8" if use_optimized_models
-                else "native_fp32_baseline" if bool(optimized_models[0])
-                else "single_model_override" if args.model is not None
-                else "config_default"
-            ),
+            "model_condition": model_condition,
             "command": command,
             "start_temperature_c": start_temp,
             "system_before": system_snapshot(),
@@ -518,6 +533,11 @@ def main() -> None:
             "detections_log": str(output.with_name("runtime_detections.jsonl")),
         })
         write_json(run_dir / "run_manifest.json", run_meta)
+        print(
+            f"[suite] finished {index}/{len(strategies)}: {strategy}; "
+            f"returncode={returncode}; end temperature={run_meta['end_temperature_c']}",
+            flush=True,
+        )
         manifest["runs"].append(run_meta)
         write_json(suite_dir / "manifest.json", manifest)
         if returncode != 0:

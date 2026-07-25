@@ -367,7 +367,7 @@ def verify_fan_hardware(args: argparse.Namespace, suite_dir: Path) -> None:
         sys.executable,
         str(ROOT / "scripts" / "test_fan_gpio.py"),
         "--config", str(args.config),
-        "--strategy", "native_rtdetr",
+        "--strategy", "scene_thermal_interval_lk",
         "--duty", "1.0",
         "--seconds", "1.0",
     ]

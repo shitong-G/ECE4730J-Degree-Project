@@ -18,9 +18,9 @@ runtime:
   default_cpu_threads: 4
 
 thermal:
-  normal_max_c: 65.0
-  warm_max_c: 70.0
-  critical_c: 75.0
+  normal_max_c: 80.0
+  warm_max_c: 84.0
+  critical_c: 87.0
   hysteresis_c: 2.5
   warm_hold_frames: 8
   hot_hold_frames: 10
@@ -33,7 +33,7 @@ thermal:
   pressure_hysteresis_c: 1.0
   pressure_hold_frames: 60
   pressure_hold_sec: 15.0
-  target_c: 72.0
+  target_c: 84.0
   recovery_slope_c_per_min: -0.05
   preemptive_slope_c_per_min: 0.8
   use_throttling_pressure: true
@@ -42,9 +42,9 @@ thermal:
   arm_freq_capped_state: critical
   balanced_interval_cap: 4
 
-  balanced_warm_recover_c: 64.0
-  balanced_hot_recover_c: 69.0
-  balanced_critical_recover_c: 73.0
+  balanced_warm_recover_c: 79.0
+  balanced_hot_recover_c: 83.2
+  balanced_critical_recover_c: 85.5
 
   balanced_normal_governor: performance
   balanced_warm_resolution_steps: 0

@@ -126,6 +126,27 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Require a real GPIO PWM fan test before the suite starts (default: enabled).",
     )
+    parser.add_argument(
+        "--cooldown-fan",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Run the PWM fan at full duty only while cooling between experiments, "
+            "then stop and release GPIO before RT-DETR warmup (default: enabled)."
+        ),
+    )
+    parser.add_argument(
+        "--cooldown-fan-settle-sec",
+        type=float,
+        default=2.0,
+        help="Fan-off settling time before RT-DETR warmup begins.",
+    )
+    parser.add_argument(
+        "--progress-sec",
+        type=float,
+        default=30.0,
+        help="Print a live child-process heartbeat at this interval.",
+    )
     return parser.parse_args()
 
 
@@ -330,25 +351,41 @@ def build_command(
     return cmd
 
 
-def run_with_temperature_trace(cmd: list[str], trace_path: Path, interval_sec: float) -> int:
+def run_with_temperature_trace(
+    cmd: list[str],
+    trace_path: Path,
+    interval_sec: float,
+    progress_sec: float,
+) -> int:
     """Run one child process and write an independent 1 Hz thermal trace."""
     print("+ " + " ".join(cmd), flush=True)
     with trace_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["timestamp_utc", "elapsed_sec", "temp_c"])
         writer.writeheader()
         started = time.monotonic()
+        next_progress = max(1.0, progress_sec)
         process = subprocess.Popen(cmd, cwd=ROOT)
         print(
             f"[suite] child started: pid={process.pid}; thermal trace={trace_path}",
             flush=True,
         )
         while process.poll() is None:
+            elapsed = time.monotonic() - started
+            temp = cpu_temp_c()
             writer.writerow({
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                "elapsed_sec": round(time.monotonic() - started, 3),
-                "temp_c": cpu_temp_c(),
+                "elapsed_sec": round(elapsed, 3),
+                "temp_c": temp,
             })
             handle.flush()
+            if elapsed >= next_progress:
+                temp_text = f"{temp:.2f}C" if temp is not None else "unavailable"
+                print(
+                    f"[suite] running: pid={process.pid}; elapsed={elapsed:.1f}s; "
+                    f"temperature={temp_text}",
+                    flush=True,
+                )
+                next_progress += max(1.0, progress_sec)
             time.sleep(max(0.1, interval_sec))
         writer.writerow({
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -361,6 +398,19 @@ def run_with_temperature_trace(cmd: list[str], trace_path: Path, interval_sec: f
 
 def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def first_logged_temperature(path: Path) -> float | None:
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        row = next(csv.DictReader(handle), None)
+    if not row:
+        return None
+    try:
+        return float(row["temp_c"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def verify_fan_hardware(args: argparse.Namespace, suite_dir: Path) -> None:
@@ -391,27 +441,83 @@ def verify_fan_hardware(args: argparse.Namespace, suite_dir: Path) -> None:
         )
 
 
-def wait_until_cool_enough(args: argparse.Namespace) -> tuple[list[dict[str, Any]], float | None]:
+def start_cooldown_fan(args: argparse.Namespace):
+    """Start full-speed fan cooling using a controller that releases GPIO on close."""
+    sys.path.insert(0, str(ROOT / "src"))
+    from scene_runtime.device.fan import PwmFanController
+    from scene_runtime.runtime.config import load_config
+
+    config = load_config(args.config, "scene_thermal_interval_lk")
+    config.setdefault("project", {})["strategy"] = "suite_cooldown"
+    fan_cfg = config.setdefault("fan", {})
+    fan_cfg.update({
+        "enabled": True,
+        "enabled_strategies": ["suite_cooldown"],
+        "on_temp_c": 0.0,
+        "off_temp_c": -1.0,
+        "full_temp_c": 1.0,
+        "min_duty_cycle": 1.0,
+        "max_duty_cycle": 1.0,
+        "hold_low_on_close": False,
+    })
+    controller = PwmFanController(config)
+    state = controller.update({"temp_c": 100.0, "thermal_state": "critical"})
+    if state.mode != "pwm":
+        error = controller.last_error or "unknown GPIO error"
+        controller.close()
+        raise RuntimeError(f"Cooldown fan could not apply real PWM: {error}")
+    return controller
+
+
+def wait_until_cool_enough(
+    args: argparse.Namespace,
+    *,
+    allow_fan: bool,
+) -> tuple[list[dict[str, Any]], float | None]:
     """Wait only for cooling; the child then heats with real RT-DETR inference."""
     target = float(args.detr_warmup_temp_c)
     deadline = time.monotonic() + args.max_wait_min * 60.0
     samples: list[dict[str, Any]] = []
-    while True:
-        temp = cpu_temp_c()
-        samples.append({
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-            "temp_c": temp,
-            "phase": "cool_before_detr_warmup",
-        })
-        if temp is not None and temp <= target:
-            return samples, temp
-        if time.monotonic() >= deadline:
-            raise RuntimeError(
-                f"CPU did not cool to <= {target:.2f}C before RT-DETR warmup."
+    controller = None
+    try:
+        while True:
+            temp = cpu_temp_c()
+            samples.append({
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "temp_c": temp,
+                "phase": (
+                    "fan_cool_before_detr_warmup"
+                    if controller is not None
+                    else "cool_before_detr_warmup"
+                ),
+            })
+            if temp is not None and temp <= target:
+                return samples, temp
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"CPU did not cool to <= {target:.2f}C before RT-DETR warmup."
+                )
+            if allow_fan and args.cooldown_fan and controller is None:
+                controller = start_cooldown_fan(args)
+                print(
+                    "[suite] cooldown fan started at 100% PWM; "
+                    "it will stop before RT-DETR warmup.",
+                    flush=True,
+                )
+            current = f"{temp:.2f}C" if temp is not None else "unavailable"
+            cooling = "fan=100%" if controller is not None else "passive cooling"
+            print(
+                f"Waiting to cool before RT-DETR warmup: "
+                f"{current} > {target:.2f}C ({cooling})",
+                flush=True,
             )
-        current = f"{temp:.2f}C" if temp is not None else "unavailable"
-        print(f"Waiting to cool before RT-DETR warmup: {current} > {target:.2f}C", flush=True)
-        time.sleep(max(1.0, args.poll_sec))
+            time.sleep(max(1.0, args.poll_sec))
+    finally:
+        if controller is not None:
+            controller.close()
+            print("[suite] cooldown fan stopped; GPIO released.", flush=True)
+            if args.cooldown_fan_settle_sec > 0:
+                time.sleep(args.cooldown_fan_settle_sec)
 
 
 def main() -> None:
@@ -422,6 +528,10 @@ def main() -> None:
         raise ValueError("--preheat-workers cannot be negative")
     if args.detr_warmup_temp_c < 0 or args.detr_warmup_max_sec <= 0:
         raise ValueError("RT-DETR warmup temperature must be non-negative and max time positive")
+    if args.cooldown_fan_settle_sec < 0:
+        raise ValueError("--cooldown-fan-settle-sec cannot be negative")
+    if args.progress_sec <= 0:
+        raise ValueError("--progress-sec must be positive")
     if args.detr_warmup_temp_c > 0 and args.preheat_workers:
         raise ValueError("Use either --detr-warmup-temp-c or --preheat-workers, not both")
     if args.detr_warmup_temp_c <= 0 and args.start_temp_c is None:
@@ -483,7 +593,7 @@ def main() -> None:
         run_dir.mkdir()
         output = run_dir / "runtime.csv"
         conditioning, start_temp = (
-            wait_until_cool_enough(args)
+            wait_until_cool_enough(args, allow_fan=index > 1)
             if args.detr_warmup_temp_c > 0
             else wait_for_normalised_temperature(args)
         )
@@ -508,7 +618,7 @@ def main() -> None:
         print(
             f"\n[suite] starting {index}/{len(strategies)}: {strategy}\n"
             f"  model condition: {model_condition}\n"
-            f"  start temperature: {start_text}\n"
+            f"  pre-warmup temperature: {start_text}\n"
             f"  PWM fan expected: {'yes' if fan_expected else 'no'}\n"
             f"  output directory: {run_dir}",
             flush=True,
@@ -517,15 +627,21 @@ def main() -> None:
             "strategy": strategy,
             "model_condition": model_condition,
             "command": command,
-            "start_temperature_c": start_temp,
+            "pre_warmup_temperature_c": start_temp,
             "system_before": system_snapshot(),
             "started_utc": datetime.now(timezone.utc).isoformat(),
         }
         write_json(run_dir / "run_manifest.json", run_meta)
-        returncode = run_with_temperature_trace(command, run_dir / "temperature_trace.csv", args.temperature_trace_sec)
+        returncode = run_with_temperature_trace(
+            command,
+            run_dir / "temperature_trace.csv",
+            args.temperature_trace_sec,
+            args.progress_sec,
+        )
         run_meta.update({
             "finished_utc": datetime.now(timezone.utc).isoformat(),
             "returncode": returncode,
+            "formal_start_temperature_c": first_logged_temperature(output),
             "end_temperature_c": cpu_temp_c(),
             "system_after": system_snapshot(),
             "runtime_log": str(output),
@@ -535,7 +651,9 @@ def main() -> None:
         write_json(run_dir / "run_manifest.json", run_meta)
         print(
             f"[suite] finished {index}/{len(strategies)}: {strategy}; "
-            f"returncode={returncode}; end temperature={run_meta['end_temperature_c']}",
+            f"returncode={returncode}; formal start temperature="
+            f"{run_meta['formal_start_temperature_c']}; "
+            f"end temperature={run_meta['end_temperature_c']}",
             flush=True,
         )
         manifest["runs"].append(run_meta)

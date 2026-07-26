@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -212,6 +213,24 @@ def parse_args() -> argparse.Namespace:
         "--run-id",
         default=datetime.now().strftime("defense_%Y%m%d_%H%M%S"),
     )
+    parser.add_argument(
+        "--resume-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Resume an existing suite directory. Successful conditions are "
+            "kept and only incomplete conditions are run."
+        ),
+    )
+    parser.add_argument(
+        "--resume-rerun-from-index",
+        type=int,
+        default=None,
+        help=(
+            "When resuming, invalidate and rerun this 1-based condition index "
+            "and all later conditions. Old directories are preserved."
+        ),
+    )
     parser.add_argument("--cooldown-temp-c", type=float, default=50.0)
     parser.add_argument("--cooldown-tolerance-c", type=float, default=0.5)
     parser.add_argument("--max-wait-min", type=float, default=90.0)
@@ -310,6 +329,10 @@ def validate_args(args: argparse.Namespace, specs: list[ExperimentSpec]) -> None
         )
     if args.query_budget_hysteresis_c < 0:
         raise ValueError("--query-budget-hysteresis-c cannot be negative")
+    if args.resume_rerun_from_index is not None and args.resume_rerun_from_index < 1:
+        raise ValueError("--resume-rerun-from-index must be positive")
+    if args.resume_rerun_from_index is not None and args.resume_dir is None:
+        raise ValueError("--resume-rerun-from-index requires --resume-dir")
     required = {args.config, args.video}
     kinds = {spec.model_kind for spec in specs}
     if "native" in kinds:
@@ -526,30 +549,78 @@ def main() -> None:
         print_plan(args, specs)
         return
 
-    suite_dir = args.output_dir / args.run_id
-    suite_dir.mkdir(parents=True, exist_ok=False)
-    manifest: dict[str, Any] = {
-        "protocol": "defense A-E matrix with unique-condition reuse and controlled cooldown",
-        "selected_groups": sorted(groups),
-        "arguments": {
-            key: str(value) if isinstance(value, Path) else value
-            for key, value in vars(args).items()
-        },
-        "experiment_order": [asdict(spec) for spec in specs],
-        "input_sha256": sha256(args.video),
-        "model_sha256": {
-            "native_640": sha256(args.native_model) if args.native_model.exists() else None,
-            "int8_320": sha256(args.quantized_model_320) if args.quantized_model_320.exists() else None,
-            "int8_480": sha256(args.quantized_model_480) if args.quantized_model_480.exists() else None,
-            "int8_640": sha256(args.quantized_model_640) if args.quantized_model_640.exists() else None,
-            "dynamic_query_int8_320": sha256(args.dynamic_query_model_320) if args.dynamic_query_model_320.exists() else None,
-            "dynamic_query_int8_480": sha256(args.dynamic_query_model_480) if args.dynamic_query_model_480.exists() else None,
-            "dynamic_query_int8_640": sha256(args.dynamic_query_model_640) if args.dynamic_query_model_640.exists() else None,
-        },
-        "system_before": system_snapshot(),
-        "runs": [],
-    }
-    write_json(suite_dir / "manifest.json", manifest)
+    if args.resume_dir is not None:
+        suite_dir = args.resume_dir.resolve()
+        manifest_path = suite_dir / "manifest.json"
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Cannot resume; missing manifest: {manifest_path}")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_keys = [item.get("key") for item in manifest.get("experiment_order", [])]
+        requested_keys = [spec.key for spec in specs]
+        if manifest_keys != requested_keys:
+            raise ValueError(
+                "Resume arguments do not match the existing suite experiment order. "
+                f"Existing={manifest_keys}; requested={requested_keys}"
+            )
+        if args.resume_rerun_from_index is not None:
+            rerun_index = args.resume_rerun_from_index
+            if rerun_index > len(specs):
+                raise ValueError(
+                    f"--resume-rerun-from-index must be <= {len(specs)}"
+                )
+            invalidated: list[dict[str, Any]] = []
+            for item in list(manifest.get("runs", [])):
+                order = int(item.get("order", 0))
+                if order < rerun_index:
+                    continue
+                old_dir = suite_dir / f"{order:02d}_{item.get('key')}"
+                if old_dir.exists():
+                    backup = suite_dir / (
+                        f"{old_dir.name}_invalidated_power_"
+                        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    )
+                    shutil.move(str(old_dir), str(backup))
+                    invalidated.append(
+                        {"key": item.get("key"), "order": order, "path": str(backup)}
+                    )
+            manifest["runs"] = [
+                item
+                for item in manifest.get("runs", [])
+                if int(item.get("order", 0)) < rerun_index
+            ]
+            manifest.setdefault("invalidated_runs", []).extend(invalidated)
+            write_json(suite_dir / "manifest.json", manifest)
+            print(
+                f"[defense-suite] invalidated {len(invalidated)} old run(s) "
+                f"from index {rerun_index}; originals preserved",
+                flush=True,
+            )
+        print(f"[defense-suite] resuming existing suite: {suite_dir}", flush=True)
+    else:
+        suite_dir = args.output_dir / args.run_id
+        suite_dir.mkdir(parents=True, exist_ok=False)
+        manifest = {
+            "protocol": "defense A-E matrix with unique-condition reuse and controlled cooldown",
+            "selected_groups": sorted(groups),
+            "arguments": {
+                key: str(value) if isinstance(value, Path) else value
+                for key, value in vars(args).items()
+            },
+            "experiment_order": [asdict(spec) for spec in specs],
+            "input_sha256": sha256(args.video),
+            "model_sha256": {
+                "native_640": sha256(args.native_model) if args.native_model.exists() else None,
+                "int8_320": sha256(args.quantized_model_320) if args.quantized_model_320.exists() else None,
+                "int8_480": sha256(args.quantized_model_480) if args.quantized_model_480.exists() else None,
+                "int8_640": sha256(args.quantized_model_640) if args.quantized_model_640.exists() else None,
+                "dynamic_query_int8_320": sha256(args.dynamic_query_model_320) if args.dynamic_query_model_320.exists() else None,
+                "dynamic_query_int8_480": sha256(args.dynamic_query_model_480) if args.dynamic_query_model_480.exists() else None,
+                "dynamic_query_int8_640": sha256(args.dynamic_query_model_640) if args.dynamic_query_model_640.exists() else None,
+            },
+            "system_before": system_snapshot(),
+            "runs": [],
+        }
+        write_json(suite_dir / "manifest.json", manifest)
     if args.power_preflight:
         assert_no_undervoltage("suite start")
     if any(spec.fan_control == "enabled" for spec in specs) or args.cooldown_fan:
@@ -557,11 +628,29 @@ def main() -> None:
         if args.power_preflight:
             assert_no_undervoltage("after fan preflight")
 
+    successful_keys = {
+        item.get("key")
+        for item in manifest.get("runs", [])
+        if item.get("returncode") == 0
+        and (suite_dir / f"{int(item.get('order', 0)):02d}_{item.get('key')}").exists()
+    }
     run_dirs: list[Path] = []
     for index, spec in enumerate(specs, 1):
         run_dir = suite_dir / f"{index:02d}_{spec.key}"
-        run_dir.mkdir()
         run_dirs.append(run_dir)
+        if spec.key in successful_keys:
+            print(
+                f"[defense-suite] keeping completed {index}/{len(specs)}: {spec.key}",
+                flush=True,
+            )
+            continue
+        if run_dir.exists():
+            raise RuntimeError(
+                f"Cannot safely resume {spec.key}: {run_dir} exists but is not "
+                "marked successful. Preserve it and choose a new suite or move "
+                "the incomplete directory before retrying."
+            )
+        run_dir.mkdir()
         _, pre_temperature = cool_to_start_temperature(
             args, run_dir / "cooldown_trace.csv"
         )
@@ -611,6 +700,9 @@ def main() -> None:
             }
         )
         write_json(run_dir / "run_manifest.json", run_meta)
+        manifest["runs"] = [
+            item for item in manifest.get("runs", []) if item.get("key") != spec.key
+        ]
         manifest["runs"].append(run_meta)
         write_json(suite_dir / "manifest.json", manifest)
         print(

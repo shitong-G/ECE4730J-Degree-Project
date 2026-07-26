@@ -48,3 +48,34 @@ def test_pwm_fan_disabled_for_other_strategy() -> None:
 
     assert state.enabled is False
     assert state.mode == "disabled"
+
+
+def test_temperature_only_fan_does_not_start_before_threshold() -> None:
+    fan = PwmFanController(
+        {
+            "project": {"strategy": "scene_track_lk"},
+            "fan": {
+                "enabled": True,
+                "enabled_strategies": ["*"],
+                "temperature_only": True,
+                "on_temp_c": 68.0,
+                "off_temp_c": 62.0,
+                "full_temp_c": 82.0,
+                "min_duty_cycle": 0.35,
+                "max_duty_cycle": 1.0,
+            },
+        }
+    )
+
+    below = fan.update(
+        {"thermal_state": "critical", "temp_c": 67.9},
+        "scene_medium_thermal_critical",
+    )
+    threshold = fan.update(
+        {"thermal_state": "normal", "temp_c": 68.0},
+        "scene_medium",
+    )
+
+    assert below.enabled is False
+    assert threshold.enabled is True
+    assert threshold.duty_cycle == 0.35

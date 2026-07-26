@@ -38,6 +38,7 @@ class PwmFanController:
         self._full_temp_c = float(cfg.get("full_temp_c", critical + 4.0))
         self._min_duty = float(cfg.get("min_duty_cycle", 0.35))
         self._max_duty = float(cfg.get("max_duty_cycle", 1.0))
+        self._temperature_only = bool(cfg.get("temperature_only", False))
         self._hold_low_on_close = bool(cfg.get("hold_low_on_close", True))
 
         self._active = False
@@ -119,10 +120,13 @@ class PwmFanController:
         thermal_state: str,
         action_mode: str | None,
     ) -> bool:
-        if thermal_state in {"hot", "critical"}:
-            return True
-        if action_mode and ("_thermal_hot" in action_mode or "_thermal_critical" in action_mode):
-            return True
+        if not self._temperature_only:
+            if thermal_state in {"hot", "critical"}:
+                return True
+            if action_mode and (
+                "_thermal_hot" in action_mode or "_thermal_critical" in action_mode
+            ):
+                return True
         if temp_c is None:
             return self._active
         if self._active:

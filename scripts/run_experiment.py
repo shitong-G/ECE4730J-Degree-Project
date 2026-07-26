@@ -143,8 +143,32 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run RT-DETR immediately when LK tracking quality degrades",
     )
+    p.add_argument(
+        "--disable-roi-refresh",
+        action="store_true",
+        help=(
+            "Disable ROI detector refresh while leaving LK/event-triggered full-frame "
+            "refresh enabled. Intended for the ROI ablation."
+        ),
+    )
     p.add_argument("--lk-max-failure-ratio", type=float, default=None)
     p.add_argument("--lk-min-valid-points", type=int, default=None)
+    p.add_argument(
+        "--fan-control",
+        choices=["config", "enabled", "disabled"],
+        default="config",
+        help="Use configured fan behavior, force threshold/PWM fan on, or force it off.",
+    )
+    p.add_argument("--fan-on-temp-c", type=float, default=None)
+    p.add_argument("--fan-off-temp-c", type=float, default=None)
+    p.add_argument("--fan-full-temp-c", type=float, default=None)
+    p.add_argument("--fan-min-duty-cycle", type=float, default=None)
+    p.add_argument("--fan-max-duty-cycle", type=float, default=None)
+    p.add_argument(
+        "--fan-temperature-only",
+        action="store_true",
+        help="Trigger the formal-run fan only from temperature thresholds.",
+    )
     p.add_argument(
         "--no-stage-summary",
         action="store_true",
@@ -212,10 +236,39 @@ def main() -> None:
         config.setdefault("tracking", {})["enable_lk_tracking"] = True
     if args.lk_force_refresh_on_failure:
         config.setdefault("tracking", {})["lk_force_refresh_on_failure"] = True
+    if args.disable_roi_refresh:
+        config.setdefault("tracking", {})["roi_refresh_enabled"] = False
     if args.lk_max_failure_ratio is not None:
         config.setdefault("tracking", {})["lk_max_failure_ratio"] = args.lk_max_failure_ratio
     if args.lk_min_valid_points is not None:
         config.setdefault("tracking", {})["lk_min_valid_points"] = args.lk_min_valid_points
+    fan_cfg = config.setdefault("fan", {})
+    if args.fan_control == "enabled":
+        fan_cfg["enabled"] = True
+        fan_cfg["enabled_strategies"] = ["*"]
+    elif args.fan_control == "disabled":
+        fan_cfg["enabled"] = False
+    if args.fan_temperature_only:
+        fan_cfg["temperature_only"] = True
+    fan_overrides = {
+        "on_temp_c": args.fan_on_temp_c,
+        "off_temp_c": args.fan_off_temp_c,
+        "full_temp_c": args.fan_full_temp_c,
+        "min_duty_cycle": args.fan_min_duty_cycle,
+        "max_duty_cycle": args.fan_max_duty_cycle,
+    }
+    for key, value in fan_overrides.items():
+        if value is not None:
+            fan_cfg[key] = value
+    fan_off = float(fan_cfg.get("off_temp_c", 0.0))
+    fan_on = float(fan_cfg.get("on_temp_c", fan_off))
+    fan_full = float(fan_cfg.get("full_temp_c", fan_on))
+    fan_min = float(fan_cfg.get("min_duty_cycle", 0.0))
+    fan_max = float(fan_cfg.get("max_duty_cycle", 1.0))
+    if not fan_off <= fan_on <= fan_full:
+        raise ValueError("Fan thresholds must satisfy off_temp_c <= on_temp_c <= full_temp_c")
+    if not 0.0 <= fan_min <= fan_max <= 1.0:
+        raise ValueError("Fan duty cycles must satisfy 0 <= min <= max <= 1")
 
     if args.output is None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")

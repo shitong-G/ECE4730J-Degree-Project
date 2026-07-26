@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import time
+import logging
 from typing import Any
 
 import cv2
@@ -12,6 +13,9 @@ import numpy as np
 from scene_runtime.controller.actions import RuntimeAction
 from scene_runtime.inference.postprocess import Detection, postprocess_rtdetr_outputs
 from scene_runtime.inference.rtdetr_engine import BaseInferenceEngine
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ONNXRTDETREngine(BaseInferenceEngine):
@@ -39,6 +43,9 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         enable_cpu_mem_arena: bool = True,
         enable_mem_pattern: bool = True,
         log_severity_level: int = 3,
+        query_budget_mode: str = "auto",
+        query_budget_input_name: str = "query_budget",
+        max_query_budget: int = 300,
     ) -> None:
         self._model_path = model_path
         self._model_paths_by_resolution = {
@@ -71,6 +78,24 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         self._enable_cpu_mem_arena = bool(enable_cpu_mem_arena)
         self._enable_mem_pattern = bool(enable_mem_pattern)
         self._log_severity_level = int(log_severity_level)
+        self._query_budget_mode = str(query_budget_mode).lower()
+        if self._query_budget_mode not in {
+            "auto",
+            "strict",
+            "postprocess",
+            "disabled",
+        }:
+            raise ValueError(
+                "query_budget_mode must be auto, strict, postprocess, or disabled"
+            )
+        self._query_budget_input_name = str(query_budget_input_name)
+        self._max_query_budget = max(1, int(max_query_budget))
+        self._last_requested_query_budget: int | None = None
+        self._last_applied_query_budget: int | None = None
+        self._last_query_budget_mode = "not_invoked"
+        self._last_query_budget_supported = False
+        self._last_query_output_count: int | None = None
+        self._query_mode_warning_emitted = False
         self._input_names: list[str] = []
         self._output_names: list[str] = []
         self._input_names_by_resolution: dict[int, list[str]] = {}
@@ -103,6 +128,31 @@ class ONNXRTDETREngine(BaseInferenceEngine):
     def last_resolved_input_resolution(self) -> int | None:
         """Return the latest actual image resolution fed to ONNX."""
         return self._last_resolved_input_resolution
+
+    @property
+    def last_requested_query_budget(self) -> int | None:
+        return self._last_requested_query_budget
+
+    @property
+    def last_applied_query_budget(self) -> int | None:
+        return self._last_applied_query_budget
+
+    @property
+    def last_query_budget_mode(self) -> str:
+        return self._last_query_budget_mode
+
+    @property
+    def last_query_budget_supported(self) -> bool:
+        return self._last_query_budget_supported
+
+    @property
+    def last_query_output_count(self) -> int | None:
+        return self._last_query_output_count
+
+    @property
+    def max_query_budget(self) -> int:
+        """The full exported RT-DETR query budget used for ratios."""
+        return self._max_query_budget
         
     def load(self) -> None:
         """Load ONNX session or no-op in dry-run mode."""
@@ -192,11 +242,46 @@ class ONNXRTDETREngine(BaseInferenceEngine):
     def _create_session(self, ort: Any, model_path: str, cpu_threads: int | None) -> Any:
         """Create one ONNX Runtime session, optionally pinning intra-op threads."""
         options = self._create_session_options(ort, cpu_threads)
-        return ort.InferenceSession(
+        session = ort.InferenceSession(
             model_path,
             sess_options=options,
             providers=self._providers,
         )
+        self._validate_query_graph(session, model_path)
+        return session
+
+    def _validate_query_graph(self, session: Any, model_path: str) -> None:
+        """Reject strict runs unless both TopK nodes were converted.
+
+        The converter writes these node names into ONNX metadata.  Checking the
+        metadata at session creation catches an accidentally static or
+        postprocess-only model before a formal experiment starts, without
+        requiring the optional ``onnx`` Python package at runtime.
+        """
+        if self._query_budget_mode != "strict":
+            return
+        input_names = {item.name for item in session.get_inputs()}
+        if self._query_budget_input_name not in input_names:
+            raise RuntimeError(
+                "Strict query-budget run rejected: model "
+                f"{model_path!r} has no {self._query_budget_input_name!r} input."
+            )
+        metadata = {}
+        try:
+            metadata = dict(session.get_modelmeta().custom_metadata_map or {})
+        except Exception:  # pragma: no cover - provider-specific metadata API
+            metadata = {}
+        node_text = metadata.get("dynamic_query_budget_nodes", "")
+        required = ("/model/decoder/TopK", "/postprocessor/TopK")
+        if metadata.get("dynamic_query_budget") != "true" or not all(
+            name in node_text for name in required
+        ):
+            raise RuntimeError(
+                "Strict query-budget run rejected: dynamic model metadata does "
+                "not prove that decoder TopK and final prediction TopK both use "
+                f"{self._query_budget_input_name!r}. Recreate it with "
+                "tools/make_dynamic_query_onnx.py."
+            )
 
     def _create_session_options(self, ort: Any, cpu_threads: int | None) -> Any:
         options = ort.SessionOptions()
@@ -337,7 +422,12 @@ class ONNXRTDETREngine(BaseInferenceEngine):
             return self._fixed_input_size
         return requested
 
-    def _build_feeds(self, blob: np.ndarray, input_resolution: int) -> dict[str, np.ndarray]:
+    def _build_feeds(
+        self,
+        blob: np.ndarray,
+        input_resolution: int,
+        graph_query_budget: int | None,
+    ) -> dict[str, np.ndarray]:
         """Map preprocessed tensors to RT-DETR ONNX inputs."""
         feeds: dict[str, np.ndarray] = {}
         orig_sizes = np.array(
@@ -349,9 +439,49 @@ class ONNXRTDETREngine(BaseInferenceEngine):
                 feeds[name] = blob
             elif name == "orig_target_sizes":
                 feeds[name] = orig_sizes
+            elif name == self._query_budget_input_name:
+                if graph_query_budget is None:
+                    raise RuntimeError(
+                        f"ONNX requires {self._query_budget_input_name!r}, but no "
+                        "graph query budget was resolved"
+                    )
+                feeds[name] = np.asarray([graph_query_budget], dtype=np.int64)
             else:
                 raise ValueError(f"Unsupported ONNX input: {name}")
         return feeds
+
+    def _resolve_query_budget(
+        self,
+        action: RuntimeAction,
+    ) -> tuple[int, int | None, str, bool]:
+        requested = (
+            self._max_query_budget
+            if action.query_budget is None
+            else int(action.query_budget)
+        )
+        requested = min(max(1, requested), self._max_query_budget)
+        supported = self._query_budget_input_name in self._input_names
+        if supported:
+            applied = (
+                self._max_query_budget
+                if self._query_budget_mode == "disabled"
+                else requested
+            )
+            mode = (
+                "graph_input_fixed_max"
+                if self._query_budget_mode == "disabled"
+                else "graph_input"
+            )
+            return requested, applied, mode, True
+        if self._query_budget_mode == "strict":
+            raise RuntimeError(
+                "Dynamic query budget requested in strict mode, but the ONNX "
+                f"model has no {self._query_budget_input_name!r} input. Convert "
+                "it with tools/make_dynamic_query_onnx.py."
+            )
+        if self._query_budget_mode == "postprocess":
+            return requested, requested, "postprocess_only", False
+        return requested, None, "unsupported_inactive", False
 
     def preprocess(self, frame: np.ndarray, input_resolution: int) -> np.ndarray:
         """BGR resize, RGB, normalize — adjust to match RT-DETR export."""
@@ -377,10 +507,20 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         }
     
         total_t0 = time.perf_counter()
-    
+
+        requested_budget = (
+            self._max_query_budget
+            if config.query_budget is None
+            else min(max(1, int(config.query_budget)), self._max_query_budget)
+        )
         if self._dry_run:
             time.sleep(self._dry_run_latency_ms / 1000.0)
             detections = self._fake_detections(config)
+            self._last_requested_query_budget = requested_budget
+            self._last_applied_query_budget = requested_budget
+            self._last_query_budget_mode = "dry_run"
+            self._last_query_budget_supported = True
+            self._last_query_output_count = requested_budget
             profile["infer_total_ms"] = (time.perf_counter() - total_t0) * 1000.0
             self._last_profile = profile
             return detections
@@ -395,11 +535,7 @@ class ONNXRTDETREngine(BaseInferenceEngine):
         t0 = time.perf_counter()
         blob = self.preprocess(frame, input_resolution)
         profile["preprocess_ms"] = (time.perf_counter() - t0) * 1000.0
-    
-        t0 = time.perf_counter()
-        feeds = self._build_feeds(blob, input_resolution)
-        profile["build_feed_ms"] = (time.perf_counter() - t0) * 1000.0
-    
+
         t0 = time.perf_counter()
         session, selected_resolution = self._select_session(
             config.cpu_threads,
@@ -409,15 +545,65 @@ class ONNXRTDETREngine(BaseInferenceEngine):
             self._input_names = self._input_names_by_resolution[selected_resolution]
             self._output_names = self._output_names_by_resolution[selected_resolution]
         profile["session_select_ms"] = (time.perf_counter() - t0) * 1000.0
-    
+
+        requested_budget, applied_budget, budget_mode, budget_supported = (
+            self._resolve_query_budget(config)
+        )
+        if self._query_budget_mode == "strict" and budget_mode != "graph_input":
+            raise RuntimeError(
+                "Strict query-budget run requires query_budget_mode=graph_input; "
+                f"got {budget_mode!r}. Postprocess-only truncation is not "
+                "inference acceleration."
+            )
+        if (
+            budget_mode == "postprocess_only"
+            and not self._query_mode_warning_emitted
+        ):
+            LOGGER.warning(
+                "Query budget is postprocess_only; this does not reduce decoder "
+                "computation and must not be reported as query acceleration."
+            )
+            self._query_mode_warning_emitted = True
+        if (
+            budget_mode == "unsupported_inactive"
+            and requested_budget < self._max_query_budget
+            and not self._query_mode_warning_emitted
+        ):
+            LOGGER.warning(
+                "Requested query budget %d on a static/unsupported ONNX model; "
+                "decoder still runs at full budget %d.",
+                requested_budget,
+                self._max_query_budget,
+            )
+            self._query_mode_warning_emitted = True
+        self._last_requested_query_budget = requested_budget
+        self._last_applied_query_budget = applied_budget
+        self._last_query_budget_mode = budget_mode
+        self._last_query_budget_supported = budget_supported
+
+        t0 = time.perf_counter()
+        feeds = self._build_feeds(
+            blob,
+            input_resolution,
+            applied_budget if budget_supported else None,
+        )
+        profile["build_feed_ms"] = (time.perf_counter() - t0) * 1000.0
+
         t0 = time.perf_counter()
         outputs = session.run(self._output_names, feeds)
+        self._last_query_output_count = (
+            int(np.asarray(outputs[2]).shape[-1])
+            if len(outputs) >= 3 and np.asarray(outputs[2]).ndim >= 1
+            else None
+        )
         profile["onnx_run_ms"] = (time.perf_counter() - t0) * 1000.0
-    
+
         t0 = time.perf_counter()
         detections = self.postprocess(list(outputs))
+        if budget_mode == "postprocess_only" and applied_budget is not None:
+            detections = detections[:applied_budget]
         profile["postprocess_ms"] = (time.perf_counter() - t0) * 1000.0
-    
+
         profile["infer_total_ms"] = (time.perf_counter() - total_t0) * 1000.0
         self._last_profile = profile
     

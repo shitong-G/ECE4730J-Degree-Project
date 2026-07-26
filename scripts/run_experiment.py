@@ -186,6 +186,34 @@ def parse_args() -> argparse.Namespace:
         help="Trigger the formal-run fan only from temperature thresholds.",
     )
     p.add_argument(
+        "--query-budget-mode",
+        choices=["auto", "strict", "postprocess", "disabled"],
+        default=None,
+        help=(
+            "auto uses a dynamic ONNX query_budget input when present; strict "
+            "requires it; postprocess only caps returned detections and does not "
+            "reduce decoder compute; disabled fixes dynamic models at max budget."
+        ),
+    )
+    p.add_argument(
+        "--query-budget-override",
+        type=int,
+        default=None,
+        help="Force one per-inference query budget without changing other policy knobs.",
+    )
+    p.add_argument("--query-budget-input-name", default=None)
+    p.add_argument("--max-query-budget", type=int, default=None)
+    p.add_argument(
+        "--temperature-query-budget",
+        action="store_true",
+        help="Select the graph query budget from the raw CPU thermal state.",
+    )
+    p.add_argument("--query-budget-normal", type=int, default=None)
+    p.add_argument("--query-budget-warm", type=int, default=None)
+    p.add_argument("--query-budget-hot", type=int, default=None)
+    p.add_argument("--query-budget-critical", type=int, default=None)
+    p.add_argument("--query-budget-hysteresis-c", type=float, default=None)
+    p.add_argument(
         "--no-stage-summary",
         action="store_true",
         help="Do not print post-experiment overall/stage latency summary",
@@ -272,6 +300,43 @@ def main() -> None:
         config.setdefault("tracking", {})["lk_max_failure_ratio"] = args.lk_max_failure_ratio
     if args.lk_min_valid_points is not None:
         config.setdefault("tracking", {})["lk_min_valid_points"] = args.lk_min_valid_points
+    if args.query_budget_override is not None:
+        if args.query_budget_override < 1:
+            raise ValueError("--query-budget-override must be positive")
+        config.setdefault("runtime", {})[
+            "query_budget_override"
+        ] = args.query_budget_override
+    if args.max_query_budget is not None:
+        if args.max_query_budget < 1:
+            raise ValueError("--max-query-budget must be positive")
+        config.setdefault("inference", {})[
+            "max_query_budget"
+        ] = args.max_query_budget
+    if args.query_budget_mode is not None:
+        config.setdefault("inference", {})[
+            "query_budget_mode"
+        ] = args.query_budget_mode
+    if args.query_budget_input_name is not None:
+        config.setdefault("inference", {})[
+            "query_budget_input_name"
+        ] = args.query_budget_input_name
+    query_control = config.setdefault("query_budget_control", {})
+    if args.temperature_query_budget:
+        query_control["enabled"] = True
+    query_budget_overrides = {
+        "normal_budget": args.query_budget_normal,
+        "warm_budget": args.query_budget_warm,
+        "hot_budget": args.query_budget_hot,
+        "critical_budget": args.query_budget_critical,
+        "hysteresis_c": args.query_budget_hysteresis_c,
+    }
+    for key, value in query_budget_overrides.items():
+        if value is not None:
+            if key.endswith("_budget") and value < 1:
+                raise ValueError(f"--query-budget-{key[:-7]} must be positive")
+            if key == "hysteresis_c" and value < 0:
+                raise ValueError("--query-budget-hysteresis-c cannot be negative")
+            query_control[key] = value
     fan_cfg = config.setdefault("fan", {})
     if args.fan_control == "enabled":
         fan_cfg["enabled"] = True

@@ -86,6 +86,13 @@ def test_log_record_validate() -> None:
         cpu_affinity_apply_error=None,
         decoder_layers=None,
         query_budget=200,
+        query_budget_requested=200,
+        query_budget_applied=200,
+        query_budget_mode="graph_input",
+        query_budget_supported=True,
+        query_budget_source="temperature",
+        query_budget_temperature_state="warm",
+        query_output_count=200,
         fan_enabled=False,
         fan_duty_cycle=0.0,
         fan_mode="disabled",
@@ -178,6 +185,13 @@ def test_logger_writes_csv(tmp_path: Path) -> None:
         cpu_affinity_apply_error=None,
         decoder_layers=None,
         query_budget=None,
+        query_budget_requested=300,
+        query_budget_applied=None,
+        query_budget_mode="unsupported_inactive",
+        query_budget_supported=False,
+        query_budget_source="action",
+        query_budget_temperature_state=None,
+        query_output_count=None,
         fan_enabled=True,
         fan_duty_cycle=0.5,
         fan_mode="pwm_no_gpio",
@@ -197,6 +211,7 @@ def test_logger_writes_csv(tmp_path: Path) -> None:
     assert row["roi_detector_invocation_ratio"] == "1.0"
     assert row["detector_call_type"] == "roi"
     assert row["detector_call_resolution"] == "320"
+    assert row["query_budget_mode"] == "unsupported_inactive"
     assert row["effective_inference_fps"] == "10.0"
     assert row["actual_inference_fps"] == "9.5"
     assert row["currently_throttled"] == "False"

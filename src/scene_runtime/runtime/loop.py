@@ -11,6 +11,7 @@ from typing import Any, Callable
 import numpy as np
 
 from scene_runtime.controller.actions import RuntimeAction
+from scene_runtime.controller.query_budget import ThermalQueryBudgetController
 from scene_runtime.device.action_applier import AppliedRuntimeState, RuntimeActionApplier
 from scene_runtime.controller.runtime_controller import RuntimeDecisionController
 from scene_runtime.device.fan import FanState, PwmFanController
@@ -101,6 +102,11 @@ class RuntimeLoop:
             enable_cpu_mem_arena=bool(infer_cfg.get("enable_cpu_mem_arena", True)),
             enable_mem_pattern=bool(infer_cfg.get("enable_mem_pattern", True)),
             log_severity_level=int(infer_cfg.get("log_severity_level", 3)),
+            query_budget_mode=str(infer_cfg.get("query_budget_mode", "auto")),
+            query_budget_input_name=str(
+                infer_cfg.get("query_budget_input_name", "query_budget")
+            ),
+            max_query_budget=int(infer_cfg.get("max_query_budget", 300)),
         )
 
         log_cfg = config.get("logging", {})
@@ -110,6 +116,13 @@ class RuntimeLoop:
         self._metrics = MetricsTracker(
             window=int(runtime_cfg.get("metrics_window_frames", 120))
         )
+        query_override = runtime_cfg.get("query_budget_override")
+        self._query_budget_override = (
+            int(query_override) if query_override is not None else None
+        )
+        self._thermal_query_budget = ThermalQueryBudgetController(config)
+        self._query_budget_source = "action"
+        self._query_budget_temperature_state: str | None = None
         self._pre_run_warmup_enabled = bool(
             runtime_cfg.get("pre_run_warmup_enabled", False)
         )
@@ -446,6 +459,21 @@ class RuntimeLoop:
             device_state,
             self._metrics.snapshot(),
         )
+        if self._query_budget_override is not None:
+            action = replace(action, query_budget=self._query_budget_override)
+            self._query_budget_source = "fixed"
+            self._query_budget_temperature_state = None
+        elif self._thermal_query_budget.enabled:
+            budget, budget_state = self._thermal_query_budget.update(
+                str(device_state.get("thermal_state") or "unknown"),
+                device_state.get("temp_c"),
+            )
+            action = replace(action, query_budget=budget)
+            self._query_budget_source = "temperature"
+            self._query_budget_temperature_state = budget_state
+        else:
+            self._query_budget_source = "action"
+            self._query_budget_temperature_state = None
         decision_ms = self._elapsed_ms(t0)
 
         self._current_action = action
@@ -702,6 +730,20 @@ class RuntimeLoop:
             tracking_reason=tracking_report.reason,
             input_resolution=action.input_resolution,
             resolved_input_resolution=self._last_detection_resolution,
+            query_budget_requested=(
+                self._engine.last_requested_query_budget
+                if run_infer
+                else action.query_budget
+            ),
+            query_budget_applied=(
+                self._engine.last_applied_query_budget if run_infer else None
+            ),
+            query_budget_mode=(
+                self._engine.last_query_budget_mode if run_infer else "not_invoked"
+            ),
+            query_output_count=(
+                self._engine.last_query_output_count if run_infer else None
+            ),
             detections=self._last_detections,
         )
 
@@ -1350,6 +1392,27 @@ class RuntimeLoop:
             "cpu_affinity_applied": applied_state.cpu_affinity_applied,
             "decoder_layers": action.decoder_layers,
             "query_budget": action.query_budget,
+            "query_budget_requested": (
+                self._engine.last_requested_query_budget if did_infer else action.query_budget
+            ),
+            "query_budget_applied": (
+                self._engine.last_applied_query_budget if did_infer else None
+            ),
+            "query_budget_mode": (
+                self._engine.last_query_budget_mode if did_infer else "not_invoked"
+            ),
+            "query_budget_source": self._query_budget_source,
+            "query_budget_temperature_state": self._query_budget_temperature_state,
+            "query_output_count": (
+                self._engine.last_query_output_count if did_infer else None
+            ),
+            "query_budget_ratio": (
+                self._engine.last_applied_query_budget / self._engine.max_query_budget
+                if did_infer
+                and self._engine.last_applied_query_budget is not None
+                and self._engine.max_query_budget > 0
+                else None
+            ),
             "detection_count": summary["detection_count"],
             "confidence_mean": summary["confidence_mean"],
             "serial_total_ms": serial_total_ms,
@@ -1500,6 +1563,38 @@ class RuntimeLoop:
             cpu_affinity_apply_error=applied_state.cpu_affinity_apply_error,
             decoder_layers=action.decoder_layers,
             query_budget=action.query_budget,
+            query_budget_requested=(
+                self._engine.last_requested_query_budget if did_infer else action.query_budget
+            ),
+            query_budget_applied=(
+                self._engine.last_applied_query_budget if did_infer else None
+            ),
+            query_budget_mode=(
+                self._engine.last_query_budget_mode if did_infer else "not_invoked"
+            ),
+            query_budget_supported=(
+                self._engine.last_query_budget_supported if did_infer else None
+            ),
+            query_budget_source=self._query_budget_source,
+            query_budget_temperature_state=self._query_budget_temperature_state,
+            query_output_count=(
+                self._engine.last_query_output_count if did_infer else None
+            ),
+            query_budget_ratio=(
+                (
+                    self._engine.last_applied_query_budget
+                    / self._engine.max_query_budget
+                )
+                if did_infer
+                and self._engine.last_applied_query_budget is not None
+                and self._engine.max_query_budget > 0
+                else None
+            ),
+            onnx_run_ms=(
+                float(self._engine.last_profile.get("onnx_run_ms", 0.0))
+                if did_infer
+                else None
+            ),
             fan_enabled=fan_state.enabled,
             fan_duty_cycle=fan_state.duty_cycle,
             fan_mode=fan_state.mode,

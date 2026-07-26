@@ -8,7 +8,7 @@ from pathlib import Path
 from scripts.analyze_defense_experiment_suite import make_plots, summarize_run
 
 
-def test_defense_summary_and_seven_plots(tmp_path: Path) -> None:
+def test_defense_summary_and_query_plots(tmp_path: Path) -> None:
     run_dir = tmp_path / "01_native_fp32"
     run_dir.mkdir()
     rows = [
@@ -64,4 +64,4 @@ def test_defense_summary_and_seven_plots(tmp_path: Path) -> None:
     output_dir = tmp_path / "analysis"
     output_dir.mkdir()
     make_plots([(summary, rows)], [summary], output_dir)
-    assert len(list(output_dir.glob("*.png"))) == 7
+    assert len(list(output_dir.glob("*.png"))) == 9

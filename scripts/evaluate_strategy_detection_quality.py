@@ -215,6 +215,9 @@ def _csv_metrics(rows: list[dict[str, str]]) -> dict[str, float | None]:
     tracking_rows = [
         row for row in rows if str(row.get("tracking_mode", "")).lower() == "track"
     ]
+    inference_rows = [
+        row for row, infer in zip(rows, did_infer) if infer
+    ]
     final_row = rows[-1] if rows else {}
     cumulative_detector_count = _to_float(final_row.get("detector_invocation_count"))
     cumulative_full_count = _to_float(
@@ -268,6 +271,21 @@ def _csv_metrics(rows: list[dict[str, str]]) -> dict[str, float | None]:
         ),
         "tracking_failed_box_count_mean": _mean(
             _series(tracking_rows, "tracking_failed_box_count")
+        ),
+        "query_budget_applied_mean": _mean(
+            _series(rows, "query_budget_applied", positive=True)
+        ),
+        "query_output_count_mean": _mean(
+            _series(rows, "query_output_count", positive=True)
+        ),
+        "graph_query_budget_ratio": (
+            sum(
+                str(row.get("query_budget_mode", "")).lower() == "graph_input"
+                for row in inference_rows
+            )
+            / len(inference_rows)
+            if inference_rows
+            else None
         ),
         "latency_ms_mean": _mean(_series(rows, "latency_ms", positive=True)),
         "latency_ms_p95": _percentile(_series(rows, "latency_ms", positive=True), 0.95),

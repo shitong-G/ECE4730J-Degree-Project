@@ -85,6 +85,15 @@ LOG_COLUMNS = [
     "cpu_affinity_apply_error",
     "decoder_layers",
     "query_budget",
+    "query_budget_requested",
+    "query_budget_applied",
+    "query_budget_mode",
+    "query_budget_supported",
+    "query_budget_source",
+    "query_budget_temperature_state",
+    "query_output_count",
+    "query_budget_ratio",
+    "onnx_run_ms",
     "fan_enabled",
     "fan_duty_cycle",
     "fan_mode",
@@ -173,11 +182,20 @@ class LogRecord:
     cpu_affinity_apply_error: str | None
     decoder_layers: int | None
     query_budget: int | None
+    query_budget_requested: int | None
+    query_budget_applied: int | None
+    query_budget_mode: str | None
+    query_budget_supported: bool | None
+    query_budget_source: str | None
+    query_budget_temperature_state: str | None
+    query_output_count: int | None
     fan_enabled: bool
     fan_duty_cycle: float
     fan_mode: str | None
     detection_count: int
     confidence_mean: float
+    query_budget_ratio: float | None = None
+    onnx_run_ms: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {col: getattr(self, col) for col in LOG_COLUMNS}

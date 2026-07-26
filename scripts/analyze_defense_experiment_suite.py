@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create defense tables and the seven required plots from a defense suite."""
+"""Create defense tables, core plots, and query-budget diagnostics."""
 
 from __future__ import annotations
 
@@ -126,6 +126,31 @@ def summarize_run(
     tracking_rows = [
         row for row in rows if str(row.get("tracking_mode", "")).lower() == "track"
     ]
+    inference_rows = [
+        row for row in rows if boolean(row.get("did_infer")) is True
+    ]
+    applied_query_budgets = values(inference_rows, "query_budget_applied")
+    query_modes = sorted(
+        {
+            row.get("query_budget_mode", "")
+            for row in inference_rows
+            if row.get("query_budget_mode")
+        }
+    )
+    query_sources = sorted(
+        {
+            row.get("query_budget_source", "")
+            for row in inference_rows
+            if row.get("query_budget_source")
+        }
+    )
+    query_states = sorted(
+        {
+            row.get("query_budget_temperature_state", "")
+            for row in inference_rows
+            if row.get("query_budget_temperature_state")
+        }
+    )
     summary: dict[str, Any] = {
         "run": run_dir.name,
         "key": run_meta.get("key", run_dir.name),
@@ -149,13 +174,39 @@ def summarize_run(
         "actual_inference_fps_mean": average(values(rows, "actual_inference_fps")),
         "latency_ms_mean_detector_frames": average(latency),
         "latency_ms_p95_detector_frames": percentile(latency, 0.95),
+        "onnx_run_ms_mean": average(values(inference_rows, "onnx_run_ms", positive=True)),
         "temp_c_mean": average(temperatures),
+        "temp_c_start": temperatures[0] if temperatures else None,
         "temp_c_max": max(temperatures) if temperatures else None,
+        "temp_c_increase": (
+            max(temperatures) - temperatures[0] if temperatures else None
+        ),
         "arm_clock_mhz_mean": average(values(rows, "arm_clock_mhz")),
         "power_w_mean": average(values(rows, "power_w")),
         "tracking_frame_ratio": len(tracking_rows) / frame_count if frame_count else None,
         "tracking_failure_ratio_mean": average(values(tracking_rows, "tracking_failure_ratio")),
         "tracking_mean_quality": average(values(tracking_rows, "tracking_mean_quality")),
+        "query_budget_applied_mean": average(applied_query_budgets),
+        "query_budget_applied_min": min(applied_query_budgets) if applied_query_budgets else None,
+        "query_budget_applied_max": max(applied_query_budgets) if applied_query_budgets else None,
+        "query_budget_modes": ",".join(query_modes),
+        "query_budget_sources": ",".join(query_sources),
+        "query_budget_temperature_states": ",".join(query_states),
+        "query_output_count_mean": average(
+            values(inference_rows, "query_output_count", positive=True)
+        ),
+        "query_budget_ratio_mean": average(
+            values(inference_rows, "query_budget_ratio", positive=True)
+        ),
+        "graph_query_budget_ratio": (
+            sum(
+                row.get("query_budget_mode") == "graph_input"
+                for row in inference_rows
+            )
+            / len(inference_rows)
+            if inference_rows
+            else None
+        ),
         "fan_active_ratio": sum(
             (number(row.get("fan_duty_cycle")) or 0) > 0 for row in rows
         ) / frame_count if frame_count else None,
@@ -325,6 +376,180 @@ def make_plots(
     fig.savefig(output_dir / "07_ablation_bar_chart.png")
     plt.close(fig)
 
+    query_rows = [
+        row
+        for row in summaries
+        if row.get("query_budget_applied_mean") is not None
+        and float(row.get("graph_query_budget_ratio") or 0) > 0
+    ]
+    fig, ax = plt.subplots(figsize=(10, 7), constrained_layout=True)
+    if query_rows:
+        query_x = [
+            float(row["query_budget_applied_mean"]) for row in query_rows
+        ]
+        query_latency = [
+            float(row.get("latency_ms_mean_detector_frames") or 0)
+            for row in query_rows
+        ]
+        query_recall = [
+            float(row.get("pseudo_recall") or 0) for row in query_rows
+        ]
+        ax.scatter(query_x, query_latency, color="#4e79a7", s=75)
+        annotate(ax, query_x, query_latency, [short_label(row) for row in query_rows])
+        quality_ax = ax.twinx()
+        quality_ax.scatter(
+            query_x,
+            query_recall,
+            color="#e15759",
+            marker="s",
+            s=65,
+            label="Pseudo recall",
+        )
+        quality_ax.set_ylabel("Pseudo recall vs native FP32")
+        quality_ax.set_ylim(0, 1.05)
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "No graph-query conditions in this suite",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+    ax.set(
+        title="Graph query-budget trade-off",
+        xlabel="Mean graph-applied query budget",
+        ylabel="Mean detector-frame latency (ms)",
+    )
+    fig.savefig(output_dir / "08_query_budget_tradeoff.png")
+    plt.close(fig)
+
+    # A timeline is intentionally generated from the adaptive condition, when
+    # available.  It makes the runtime allocation observable rather than only
+    # reporting one aggregate mean in the summary table.
+    timeline_candidates = [
+        (summary, rows)
+        for summary, rows in run_data
+        if any(
+            str(row.get("query_budget_source", "")) == "temperature"
+            and number(row.get("query_budget_applied")) is not None
+            for row in rows
+        )
+    ]
+    if not timeline_candidates:
+        timeline_candidates = [
+            (summary, rows)
+            for summary, rows in run_data
+            if any(number(row.get("query_budget_applied")) is not None for row in rows)
+        ]
+    fig, axes = plt.subplots(2, 1, figsize=(13, 7), sharex=True, constrained_layout=True)
+    if timeline_candidates:
+        summary, rows = timeline_candidates[0]
+        timestamps = values(rows, "timestamp")
+        origin = timestamps[0] if timestamps else 0.0
+        points = []
+        for row in rows:
+            timestamp = number(row.get("timestamp"))
+            budget = number(row.get("query_budget_applied"))
+            if timestamp is None or budget is None:
+                continue
+            points.append(
+                (
+                    (timestamp - origin) / 60.0,
+                    budget,
+                    number(row.get("temp_c")),
+                    str(row.get("query_budget_temperature_state") or "unknown"),
+                    boolean(row.get("did_infer")) is True,
+                )
+            )
+        if points:
+            x = [item[0] for item in points]
+            budget = [item[1] for item in points]
+            temp = [item[2] for item in points if item[2] is not None]
+            temp_x = [item[0] for item in points if item[2] is not None]
+            invoked = [item[4] for item in points]
+            axes[0].step(x, budget, where="post", linewidth=1.3, label="Applied Q")
+            axes[0].scatter(
+                [a for a, active in zip(x, invoked) if active],
+                [b for b, active in zip(budget, invoked) if active],
+                s=8,
+                label="Detector invocation",
+            )
+            axes[0].set_ylabel("Query budget")
+            axes[0].set_title(f"Query-budget timeline: {short_label(summary)}")
+            axes[0].legend(fontsize=8)
+            if temp:
+                twin = axes[1].twinx()
+                twin.plot(temp_x, temp, color="#e15759", linewidth=1.0, label="Temperature")
+                twin.set_ylabel("Temperature (°C)")
+            states = {"normal": 0, "warm": 1, "hot": 2, "critical": 3, "unknown": -1}
+            state_y = [states.get(item[3], -1) for item in points]
+            axes[1].step(x, state_y, where="post", color="#59a14f", linewidth=1.1)
+            axes[1].set_yticks([0, 1, 2, 3], ["normal", "warm", "hot", "critical"])
+            axes[1].set_ylabel("Thermal state")
+        else:
+            axes[0].text(0.5, 0.5, "No applied query-budget rows", ha="center", transform=axes[0].transAxes)
+    else:
+        axes[0].text(0.5, 0.5, "No graph-query condition in this suite", ha="center", transform=axes[0].transAxes)
+    axes[1].set_xlabel("Formal-run time (min)")
+    fig.savefig(output_dir / "query_budget_timeline.png")
+    plt.close(fig)
+
+
+def write_query_budget_summary(
+    summaries: list[dict[str, Any]], output_dir: Path
+) -> None:
+    """Write the defense-facing query-budget comparison table."""
+    rows: list[dict[str, Any]] = []
+    for item in summaries:
+        if item.get("query_budget_applied_mean") is None:
+            continue
+        key = str(item.get("key", ""))
+        if "qthermal" in key or "temperature" in str(item.get("query_budget_sources", "")):
+            budget_label = "Adaptive (64/48/40/32)"
+        elif "q64" in key:
+            budget_label = "Q=64"
+        elif "q300" in key or item.get("query_budget_applied_mean") == 300:
+            budget_label = "Q=300"
+        else:
+            budget_label = f"Q={item['query_budget_applied_mean']:.0f}"
+        rows.append(
+            {
+                "Method": item.get("title", key),
+                "Query budget": budget_label,
+                "Average latency": item.get("latency_ms_mean_detector_frames"),
+                "Average FPS": item.get("loop_fps_mean"),
+                "Temperature increase": item.get("temp_c_increase"),
+                "Pseudo recall": item.get("pseudo_recall"),
+                "IoU": item.get("mean_matched_iou"),
+                "Detector invocation ratio": item.get("detector_invocation_ratio"),
+                "Query budget ratio": item.get("query_budget_ratio_mean"),
+                "Query mode": item.get("query_budget_modes"),
+                "Query execution cost": item.get("onnx_run_ms_mean"),
+            }
+        )
+    path = output_dir / "query_budget_summary.csv"
+    if rows:
+        write_rows(path, rows)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            csv.writer(handle).writerow(
+                [
+                    "Method",
+                    "Query budget",
+                    "Average latency",
+                    "Average FPS",
+                    "Temperature increase",
+                    "Pseudo recall",
+                    "IoU",
+                    "Detector invocation ratio",
+                    "Query budget ratio",
+                    "Query mode",
+                    "Query execution cost",
+                ]
+            )
+
 
 def main() -> None:
     args = parse_args()
@@ -350,12 +575,17 @@ def main() -> None:
     if not summaries:
         raise RuntimeError("No completed runs are listed in manifest.json")
     write_rows(output_dir / "defense_summary.csv", summaries)
+    write_query_budget_summary(summaries, output_dir)
     make_plots(run_data, summaries, output_dir)
     print(f"Saved defense summary: {output_dir / 'defense_summary.csv'}")
-    for index in range(1, 8):
+    for index in range(1, 9):
         matches = list(output_dir.glob(f"{index:02d}_*.png"))
         if matches:
             print(f"Saved plot: {matches[0]}")
+    for name in ("query_budget_timeline.png", "query_budget_summary.csv"):
+        path = output_dir / name
+        if path.exists():
+            print(f"Saved query output: {path}")
 
 
 if __name__ == "__main__":

@@ -82,6 +82,24 @@ inference:
   warmup_runs: 0
   warmup_resolutions: null
   warmup_threads: null
+  # "auto" applies a real graph query budget only when the ONNX model exposes
+  # an INT64[1] query_budget input. Static exports remain unchanged.
+  query_budget_mode: auto
+  query_budget_input_name: query_budget
+  max_query_budget: 300
+
+query_budget_control:
+  enabled: false
+  # Final detection counts are only an empirical lower-bound indicator: RT-DETR
+  # queries are candidate slots before classification/filtering.  These values
+  # reserve capacity for duplicate candidates, low-confidence objects,
+  # transient scene changes, and imperfect query ranking.
+  normal_budget: 64
+  warm_budget: 48
+  hot_budget: 40
+  critical_budget: 32
+  unknown_budget: 64
+  hysteresis_c: 4.0
 
 os_control:
   apply_runtime_actions: false

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -43,6 +44,8 @@ class ExperimentSpec:
     enable_lk: bool = False
     disable_roi: bool = False
     fan_control: str = "disabled"
+    query_budget_override: int | None = None
+    temperature_query_budget: bool = False
 
 
 def all_specs() -> list[ExperimentSpec]:
@@ -105,17 +108,35 @@ def all_specs() -> list[ExperimentSpec]:
         ),
         ExperimentSpec(
             "int8_event_lk_roi",
-            "INT8 event-triggered LK with 320 ROI refresh",
+            "Event LK + ROI, full query budget baseline (Q=300)",
             ("D",),
             "scene_track_lk",
-            "int8_roi_family",
+            "dynamic_query_roi_family",
+            query_budget_override=300,
+        ),
+        ExperimentSpec(
+            "int8_event_lk_roi_q64",
+            "Event LK + ROI, fixed reduced query budget (Q=64)",
+            ("D",),
+            "scene_track_lk",
+            "dynamic_query_roi_family",
+            query_budget_override=64,
+        ),
+        ExperimentSpec(
+            "int8_event_lk_roi_qthermal",
+            "Event LK + ROI, thermal-adaptive query budget (Q=64/48/40/32)",
+            ("D",),
+            "scene_track_lk",
+            "dynamic_query_roi_family",
+            temperature_query_budget=True,
         ),
         ExperimentSpec(
             "proposed_software",
-            "INT8 + event LK + ROI + scene/thermal software controller",
+            "Full controller with runtime query-budget allocation",
             ("D", "E"),
             "scene_thermal_interval_lk",
-            "int8_adaptive_family",
+            "dynamic_query_adaptive_family",
+            temperature_query_budget=True,
         ),
         ExperimentSpec(
             "native_fp32_pwm_fan",
@@ -130,8 +151,9 @@ def all_specs() -> list[ExperimentSpec]:
             "Proposed software controller with threshold/PWM fan",
             ("E",),
             "scene_thermal_interval_lk",
-            "int8_adaptive_family",
+            "dynamic_query_adaptive_family",
             fan_control="enabled",
+            temperature_query_budget=True,
         ),
     ]
 
@@ -161,6 +183,21 @@ def parse_args() -> argparse.Namespace:
         default=ROOT / "models" / "rtdetr_r18_lite_pi4_640_int8.onnx",
     )
     parser.add_argument(
+        "--dynamic-query-model-320",
+        type=Path,
+        default=ROOT / "models" / "rtdetr_r18_lite_pi4_320_int8_dynamic_q.onnx",
+    )
+    parser.add_argument(
+        "--dynamic-query-model-480",
+        type=Path,
+        default=ROOT / "models" / "rtdetr_r18_lite_pi4_480_int8_dynamic_q.onnx",
+    )
+    parser.add_argument(
+        "--dynamic-query-model-640",
+        type=Path,
+        default=ROOT / "models" / "rtdetr_r18_lite_pi4_640_int8_dynamic_q.onnx",
+    )
+    parser.add_argument(
         "--groups",
         default="ABCDE",
         help="Subset of defense groups to run, e.g. ABC, D, or A,C,E.",
@@ -184,6 +221,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--progress-sec", type=float, default=30.0)
     parser.add_argument("--first-warmup-temp-c", type=float, default=50.0)
     parser.add_argument("--first-warmup-max-sec", type=float, default=900.0)
+    parser.add_argument(
+        "--query-budget-normal", type=int, default=64,
+        help="Normal-temperature graph query budget for adaptive conditions.",
+    )
+    parser.add_argument(
+        "--query-budget-warm", type=int, default=48,
+        help="Warm-temperature graph query budget for adaptive conditions.",
+    )
+    parser.add_argument(
+        "--query-budget-hot", type=int, default=40,
+        help="Hot-temperature graph query budget for adaptive conditions.",
+    )
+    parser.add_argument(
+        "--query-budget-critical", type=int, default=32,
+        help="Critical-temperature graph query budget for adaptive conditions.",
+    )
+    parser.add_argument(
+        "--query-budget-hysteresis-c", type=float, default=4.0,
+        help="Temperature hysteresis used by the adaptive query controller.",
+    )
     parser.add_argument("--fan-on-temp-c", type=float, default=68.0)
     parser.add_argument("--fan-off-temp-c", type=float, default=62.0)
     parser.add_argument("--fan-full-temp-c", type=float, default=82.0)
@@ -193,9 +250,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-detections", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--cooldown-fan", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--fan-preflight", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--power-preflight",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fail on current or historical undervoltage before/after formal runs.",
+    )
     parser.add_argument("--evaluate-quality", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--make-plots", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--apply-runtime-actions", action="store_true")
+    parser.add_argument(
+        "--apply-runtime-actions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply the configured performance governor/affinity (default: enabled).",
+    )
     parser.add_argument("--plan-only", action="store_true")
     return parser.parse_args()
 
@@ -228,16 +296,32 @@ def validate_args(args: argparse.Namespace, specs: list[ExperimentSpec]) -> None
         raise ValueError("Fan thresholds must satisfy off <= on <= full")
     if not 0 <= args.fan_min_duty_cycle <= args.fan_max_duty_cycle <= 1:
         raise ValueError("Fan duty cycles must satisfy 0 <= min <= max <= 1")
+    budgets = (
+        args.query_budget_normal,
+        args.query_budget_warm,
+        args.query_budget_hot,
+        args.query_budget_critical,
+    )
+    if any(int(value) <= 0 for value in budgets):
+        raise ValueError("All query budgets must be positive")
+    if not args.query_budget_critical <= args.query_budget_hot <= args.query_budget_warm <= args.query_budget_normal:
+        raise ValueError(
+            "Query budgets must satisfy critical <= hot <= warm <= normal"
+        )
+    if args.query_budget_hysteresis_c < 0:
+        raise ValueError("--query-budget-hysteresis-c cannot be negative")
     required = {args.config, args.video}
     kinds = {spec.model_kind for spec in specs}
     if "native" in kinds:
         required.add(args.native_model)
-    if kinds.intersection({"int8_640", "int8_roi_family", "int8_adaptive_family"}):
+    if "int8_640" in kinds:
         required.add(args.quantized_model_640)
-    if kinds.intersection({"int8_roi_family", "int8_adaptive_family"}):
-        required.add(args.quantized_model_320)
-    if "int8_adaptive_family" in kinds:
-        required.add(args.quantized_model_480)
+    if kinds.intersection({"dynamic_query_roi_family", "dynamic_query_adaptive_family"}):
+        required.update(
+            {args.dynamic_query_model_320, args.dynamic_query_model_640}
+        )
+    if "dynamic_query_adaptive_family" in kinds:
+        required.add(args.dynamic_query_model_480)
     missing = [str(path) for path in sorted(required, key=str) if not path.exists()]
     if missing:
         raise FileNotFoundError("Required input(s) not found: " + ", ".join(missing))
@@ -249,11 +333,11 @@ def model_args(args: argparse.Namespace, spec: ExperimentSpec) -> list[str]:
     if spec.model_kind == "int8_640":
         return ["--model", str(args.quantized_model_640)]
     mappings = [
-        f"320={args.quantized_model_320}",
-        f"640={args.quantized_model_640}",
+        f"320={args.dynamic_query_model_320}",
+        f"640={args.dynamic_query_model_640}",
     ]
-    if spec.model_kind == "int8_adaptive_family":
-        mappings.insert(1, f"480={args.quantized_model_480}")
+    if spec.model_kind == "dynamic_query_adaptive_family":
+        mappings.insert(1, f"480={args.dynamic_query_model_480}")
     return ["--model-paths-by-resolution", ",".join(mappings)]
 
 
@@ -299,6 +383,28 @@ def build_command(
         command.append("--enable-lk-tracking")
     if spec.disable_roi:
         command.append("--disable-roi-refresh")
+    if spec.model_kind.startswith("dynamic_query_"):
+        command.extend(["--query-budget-mode", "strict"])
+    if spec.query_budget_override is not None:
+        command.extend(
+            ["--query-budget-override", str(spec.query_budget_override)]
+        )
+    if spec.temperature_query_budget:
+        command.extend(
+            [
+                "--temperature-query-budget",
+                "--query-budget-normal",
+                str(args.query_budget_normal),
+                "--query-budget-warm",
+                str(args.query_budget_warm),
+                "--query-budget-hot",
+                str(args.query_budget_hot),
+                "--query-budget-critical",
+                str(args.query_budget_critical),
+                "--query-budget-hysteresis-c",
+                str(args.query_budget_hysteresis_c),
+            ]
+        )
     if spec.fan_control == "enabled":
         command.extend(
             [
@@ -336,6 +442,40 @@ def print_plan(args: argparse.Namespace, specs: list[ExperimentSpec]) -> None:
         memberships = ",".join(spec.groups)
         print(f"\n{index:02d}. [{memberships}] {spec.title}")
         print("    " + subprocess.list2cmdline(build_command(args, spec, output, first_run=index == 1)))
+
+
+def assert_no_undervoltage(context: str) -> None:
+    completed = subprocess.run(
+        ["vcgencmd", "get_throttled"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"Cannot verify Raspberry Pi power state during {context}: "
+            f"{completed.stderr.strip() or completed.stdout.strip()}"
+        )
+    match = re.search(r"0x([0-9a-fA-F]+)", completed.stdout)
+    if match is None:
+        raise RuntimeError(
+            f"Unrecognised vcgencmd get_throttled output during {context}: "
+            f"{completed.stdout!r}"
+        )
+    mask = int(match.group(1), 16)
+    current_undervoltage = bool(mask & 0x1)
+    historical_undervoltage = bool(mask & 0x10000)
+    if current_undervoltage or historical_undervoltage:
+        raise RuntimeError(
+            f"Undervoltage invalidates the experiment ({context}): "
+            f"throttled=0x{mask:x}. Fix the PSU/cable and reboot until "
+            "`vcgencmd get_throttled` reports 0x0."
+        )
+    print(
+        f"[defense-suite] power check passed ({context}): "
+        f"throttled=0x{mask:x}",
+        flush=True,
+    )
 
 
 def run_quality_analysis(suite_dir: Path, run_dirs: list[Path]) -> int:
@@ -402,13 +542,20 @@ def main() -> None:
             "int8_320": sha256(args.quantized_model_320) if args.quantized_model_320.exists() else None,
             "int8_480": sha256(args.quantized_model_480) if args.quantized_model_480.exists() else None,
             "int8_640": sha256(args.quantized_model_640) if args.quantized_model_640.exists() else None,
+            "dynamic_query_int8_320": sha256(args.dynamic_query_model_320) if args.dynamic_query_model_320.exists() else None,
+            "dynamic_query_int8_480": sha256(args.dynamic_query_model_480) if args.dynamic_query_model_480.exists() else None,
+            "dynamic_query_int8_640": sha256(args.dynamic_query_model_640) if args.dynamic_query_model_640.exists() else None,
         },
         "system_before": system_snapshot(),
         "runs": [],
     }
     write_json(suite_dir / "manifest.json", manifest)
+    if args.power_preflight:
+        assert_no_undervoltage("suite start")
     if any(spec.fan_control == "enabled" for spec in specs) or args.cooldown_fan:
         verify_fan_hardware(args, suite_dir)
+        if args.power_preflight:
+            assert_no_undervoltage("after fan preflight")
 
     run_dirs: list[Path] = []
     for index, spec in enumerate(specs, 1):
@@ -418,6 +565,8 @@ def main() -> None:
         _, pre_temperature = cool_to_start_temperature(
             args, run_dir / "cooldown_trace.csv"
         )
+        if args.power_preflight:
+            assert_no_undervoltage(f"before {spec.key}, after cooldown")
         output = run_dir / "runtime.csv"
         command = build_command(args, spec, output, first_run=index == 1)
         print(
@@ -426,6 +575,8 @@ def main() -> None:
             f"  condition: {spec.title}\n"
             f"  model set: {spec.model_kind}\n"
             f"  detector interval: {spec.fixed_interval or 'controller/event'}\n"
+            f"  query budget: "
+            f"{'thermal-adaptive' if spec.temperature_query_budget else spec.query_budget_override or 'model/action default'}\n"
             f"  LK: {'yes' if spec.enable_lk or 'lk' in spec.strategy else 'no'}\n"
             f"  formal PWM fan: {'yes' if spec.fan_control == 'enabled' else 'no'}\n"
             f"  pre-child temperature: {pre_temperature:.2f}C\n"
@@ -470,6 +621,8 @@ def main() -> None:
         )
         if returncode:
             raise RuntimeError(f"{spec.key} failed with exit code {returncode}")
+        if args.power_preflight:
+            assert_no_undervoltage(f"after {spec.key}")
 
     if args.evaluate_quality and args.log_detections:
         manifest["quality_analysis_returncode"] = run_quality_analysis(

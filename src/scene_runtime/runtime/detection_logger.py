@@ -37,6 +37,10 @@ class DetectionLogger:
         tracking_reason: str | None,
         input_resolution: int,
         resolved_input_resolution: int | None,
+        query_budget_requested: int | None,
+        query_budget_applied: int | None,
+        query_budget_mode: str | None,
+        query_output_count: int | None,
         detections: list[Detection],
     ) -> None:
         if self._file is None:
@@ -50,6 +54,10 @@ class DetectionLogger:
             "tracking_reason": tracking_reason,
             "input_resolution": input_resolution,
             "resolved_input_resolution": resolved_input_resolution,
+            "query_budget_requested": query_budget_requested,
+            "query_budget_applied": query_budget_applied,
+            "query_budget_mode": query_budget_mode,
+            "query_output_count": query_output_count,
             "detections": [
                 {
                     "class_id": det.class_id,

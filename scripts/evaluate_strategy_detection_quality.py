@@ -212,19 +212,62 @@ def _csv_metrics(rows: list[dict[str, str]]) -> dict[str, float | None]:
         for value in [_to_float(row.get("fan_duty_cycle"))]
         if value is not None
     ]
+    tracking_rows = [
+        row for row in rows if str(row.get("tracking_mode", "")).lower() == "track"
+    ]
+    final_row = rows[-1] if rows else {}
+    cumulative_detector_count = _to_float(final_row.get("detector_invocation_count"))
+    cumulative_full_count = _to_float(
+        final_row.get("full_detector_invocation_count")
+    )
+    cumulative_roi_count = _to_float(final_row.get("roi_detector_invocation_count"))
     return {
         "runtime_frames": frame_count,
-        "detector_invocation_rate": (
-            sum(did_infer) / frame_count if frame_count else None
+        "detector_invocation_count": (
+            cumulative_detector_count
+            if cumulative_detector_count is not None
+            else float(sum(did_infer))
         ),
-        "full_detector_invocation_rate": (
-            sum(infer and not roi for infer, roi in zip(did_infer, roi_refresh))
-            / frame_count
+        "detector_invocation_rate": (
+            cumulative_detector_count / frame_count
+            if frame_count and cumulative_detector_count is not None
+            else sum(did_infer) / frame_count
             if frame_count
             else None
         ),
+        "full_detector_invocation_count": (
+            cumulative_full_count
+            if cumulative_full_count is not None
+            else float(sum(infer and not roi for infer, roi in zip(did_infer, roi_refresh)))
+        ),
+        "full_detector_invocation_rate": (
+            cumulative_full_count / frame_count
+            if frame_count and cumulative_full_count is not None
+            else sum(infer and not roi for infer, roi in zip(did_infer, roi_refresh)) / frame_count
+            if frame_count
+            else None
+        ),
+        "roi_detector_invocation_count": (
+            cumulative_roi_count
+            if cumulative_roi_count is not None
+            else float(sum(roi_refresh))
+        ),
         "roi_detector_invocation_rate": (
-            sum(roi_refresh) / frame_count if frame_count else None
+            cumulative_roi_count / frame_count
+            if frame_count and cumulative_roi_count is not None
+            else sum(roi_refresh) / frame_count
+            if frame_count
+            else None
+        ),
+        "tracking_frame_ratio": len(tracking_rows) / frame_count if frame_count else None,
+        "tracking_failure_ratio_mean": _mean(
+            _series(tracking_rows, "tracking_failure_ratio")
+        ),
+        "tracking_mean_quality": _mean(
+            _series(tracking_rows, "tracking_mean_quality")
+        ),
+        "tracking_failed_box_count_mean": _mean(
+            _series(tracking_rows, "tracking_failed_box_count")
         ),
         "latency_ms_mean": _mean(_series(rows, "latency_ms", positive=True)),
         "latency_ms_p95": _percentile(_series(rows, "latency_ms", positive=True), 0.95),
@@ -322,6 +365,16 @@ def _compare_one(
         "infer_frame_precision_proxy": infer_matches / infer_student if infer_student else 0.0,
         "noninfer_frame_pseudo_recall": noninfer_matches / noninfer_teacher if noninfer_teacher else 1.0,
         "noninfer_frame_precision_proxy": noninfer_matches / noninfer_student if noninfer_student else 0.0,
+        "lost_object_frame_ratio": (
+            sum(
+                1
+                for row in frame_rows
+                if row["teacher_count"] > 0 and row["student_count"] == 0
+            )
+            / sum(1 for row in frame_rows if row["teacher_count"] > 0)
+            if any(row["teacher_count"] > 0 for row in frame_rows)
+            else 0.0
+        ),
     }
     summary.update(_csv_metrics(csv_rows))
     return summary, frame_rows
@@ -472,6 +525,7 @@ def main() -> None:
             "infer_frame_precision_proxy": 1.0,
             "noninfer_frame_pseudo_recall": 1.0,
             "noninfer_frame_precision_proxy": 1.0,
+            "lost_object_frame_ratio": 0.0,
         }
         teacher_summary.update(_csv_metrics(_load_csv(args.teacher_csv)))
         summaries.append(teacher_summary)
@@ -491,14 +545,18 @@ def main() -> None:
         frame_rows.extend(rows)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    summary_fields = list(
+        dict.fromkeys(key for row in summaries for key in row.keys())
+    )
     with args.output.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(summaries[0].keys()))
+        writer = csv.DictWriter(handle, fieldnames=summary_fields)
         writer.writeheader()
         writer.writerows(summaries)
-    with args.matches_output.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(frame_rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(frame_rows)
+    if frame_rows:
+        with args.matches_output.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(frame_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(frame_rows)
     if args.plot_output is not None:
         _plot_summary(summaries, args.plot_output, args.label_source)
     print(f"Saved summary: {args.output}")

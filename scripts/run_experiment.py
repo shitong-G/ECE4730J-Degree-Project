@@ -139,6 +139,22 @@ def parse_args() -> argparse.Namespace:
         help="Use Lucas-Kanade tracking to update boxes on skipped detector frames",
     )
     p.add_argument(
+        "--fixed-inference-interval",
+        type=int,
+        default=None,
+        help=(
+            "Override the policy with a fixed detector interval. For example, 2 "
+            "runs RT-DETR on every second frame; skipped frames reuse the last "
+            "detections unless --enable-lk-tracking is also set."
+        ),
+    )
+    p.add_argument(
+        "--fixed-input-resolution",
+        type=int,
+        default=None,
+        help="Override the policy with one fixed detector input resolution.",
+    )
+    p.add_argument(
         "--lk-force-refresh-on-failure",
         action="store_true",
         help="Run RT-DETR immediately when LK tracking quality degrades",
@@ -232,6 +248,20 @@ def main() -> None:
         config.setdefault("inference", {})["thread_session_counts"] = counts
     if args.apply_runtime_actions:
         config.setdefault("os_control", {})["apply_runtime_actions"] = True
+    if args.fixed_inference_interval is not None:
+        if args.fixed_inference_interval < 1:
+            raise ValueError("--fixed-inference-interval must be at least 1")
+        policy_cfg = config.setdefault("policy", {})
+        policy_cfg["use_scene"] = False
+        policy_cfg["use_thermal"] = False
+        policy_cfg["fixed_inference_interval"] = args.fixed_inference_interval
+    if args.fixed_input_resolution is not None:
+        if args.fixed_input_resolution < 1:
+            raise ValueError("--fixed-input-resolution must be positive")
+        policy_cfg = config.setdefault("policy", {})
+        policy_cfg["use_scene"] = False
+        policy_cfg["use_thermal"] = False
+        policy_cfg["fixed_input_resolution"] = args.fixed_input_resolution
     if args.enable_lk_tracking:
         config.setdefault("tracking", {})["enable_lk_tracking"] = True
     if args.lk_force_refresh_on_failure:

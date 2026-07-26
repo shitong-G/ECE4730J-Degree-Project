@@ -38,6 +38,14 @@ def test_log_record_validate() -> None:
         throttled_occurred=None,
         soft_temp_limit_occurred=None,
         did_infer=True,
+        detector_invocation_count=1,
+        detector_invocation_ratio=1.0,
+        full_detector_invocation_count=1,
+        full_detector_invocation_ratio=1.0,
+        roi_detector_invocation_count=0,
+        roi_detector_invocation_ratio=0.0,
+        detector_call_type="full",
+        detector_call_resolution=640,
         tracking_mode="detect_reset",
         tracking_reason="detector_frame",
         tracking_ms=0.0,
@@ -122,6 +130,14 @@ def test_logger_writes_csv(tmp_path: Path) -> None:
         throttled_occurred=True,
         soft_temp_limit_occurred=False,
         did_infer=True,
+        detector_invocation_count=1,
+        detector_invocation_ratio=1.0,
+        full_detector_invocation_count=0,
+        full_detector_invocation_ratio=0.0,
+        roi_detector_invocation_count=1,
+        roi_detector_invocation_ratio=1.0,
+        detector_call_type="roi",
+        detector_call_resolution=320,
         tracking_mode="detect_reset",
         tracking_reason="detector_frame",
         tracking_ms=0.0,
@@ -177,6 +193,10 @@ def test_logger_writes_csv(tmp_path: Path) -> None:
     assert row["workload"] == "light"
     assert row["strategy"] == "dry"
     assert row["did_infer"] == "True"
+    assert row["detector_invocation_count"] == "1"
+    assert row["roi_detector_invocation_ratio"] == "1.0"
+    assert row["detector_call_type"] == "roi"
+    assert row["detector_call_resolution"] == "320"
     assert row["effective_inference_fps"] == "10.0"
     assert row["actual_inference_fps"] == "9.5"
     assert row["currently_throttled"] == "False"

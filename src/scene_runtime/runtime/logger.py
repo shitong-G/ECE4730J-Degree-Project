@@ -37,6 +37,14 @@ LOG_COLUMNS = [
     "throttled_occurred",
     "soft_temp_limit_occurred",
     "did_infer",
+    "detector_invocation_count",
+    "detector_invocation_ratio",
+    "full_detector_invocation_count",
+    "full_detector_invocation_ratio",
+    "roi_detector_invocation_count",
+    "roi_detector_invocation_ratio",
+    "detector_call_type",
+    "detector_call_resolution",
     "tracking_mode",
     "tracking_reason",
     "tracking_ms",
@@ -117,6 +125,14 @@ class LogRecord:
     throttled_occurred: bool | None
     soft_temp_limit_occurred: bool | None
     did_infer: bool
+    detector_invocation_count: int
+    detector_invocation_ratio: float
+    full_detector_invocation_count: int
+    full_detector_invocation_ratio: float
+    roi_detector_invocation_count: int
+    roi_detector_invocation_ratio: float
+    detector_call_type: str | None
+    detector_call_resolution: int | None
     tracking_mode: str | None
     tracking_reason: str | None
     tracking_ms: float

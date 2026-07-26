@@ -267,6 +267,9 @@ class RuntimeLoop:
 
         self._frame_id = 0
         self._inference_counter = 0
+        self._detector_invocation_count = 0
+        self._full_detector_invocation_count = 0
+        self._roi_detector_invocation_count = 0
         self._last_detections: list[Detection] = []
         self._prev_frame: np.ndarray | None = None
         self._current_action: RuntimeAction | None = None
@@ -469,6 +472,8 @@ class RuntimeLoop:
         infer_diagnostics: dict[str, float] = self._empty_infer_diagnostics()
 
         tracking_report = LKTrackingReport()
+        detector_call_type: str | None = None
+        detector_call_resolution: int | None = None
 
         if run_infer:
             (
@@ -476,6 +481,13 @@ class RuntimeLoop:
                 infer_outer_ms,
                 infer_profile,
             ) = self._infer_with_diagnostics(frame, action, infer_diagnostics)
+            self._detector_invocation_count += 1
+            self._full_detector_invocation_count += 1
+            detector_call_type = "full"
+            detector_call_resolution = (
+                self._engine.last_resolved_input_resolution
+                or action.input_resolution
+            )
             latency_ms = float(infer_profile.get("infer_total_ms", infer_outer_ms))
 
             self._metrics.record_latency(latency_ms)
@@ -532,6 +544,13 @@ class RuntimeLoop:
                     if roi_result is not None:
                         original_tracking_report = tracking_report
                         self._last_detections, infer_outer_ms, infer_profile = roi_result
+                        self._detector_invocation_count += 1
+                        self._roi_detector_invocation_count += 1
+                        detector_call_type = "roi"
+                        detector_call_resolution = (
+                            self._engine.last_resolved_input_resolution
+                            or self._roi_refresh_resolution
+                        )
                         self._update_roi_slow_fuse(infer_profile)
                         latency_ms = float(infer_profile.get("infer_total_ms", infer_outer_ms))
                         self._metrics.record_latency(latency_ms)
@@ -557,6 +576,13 @@ class RuntimeLoop:
                             frame,
                             action,
                             infer_diagnostics,
+                        )
+                        self._detector_invocation_count += 1
+                        self._full_detector_invocation_count += 1
+                        detector_call_type = "full"
+                        detector_call_resolution = (
+                            self._engine.last_resolved_input_resolution
+                            or action.input_resolution
                         )
                         latency_ms = float(infer_profile.get("infer_total_ms", infer_outer_ms))
                         self._metrics.record_latency(latency_ms)
@@ -598,6 +624,8 @@ class RuntimeLoop:
             run_infer,
             tracking_report,
             fan_state,
+            detector_call_type,
+            detector_call_resolution,
         )
         main_log_write_ms = self._elapsed_ms(t0)
 
@@ -1377,6 +1405,8 @@ class RuntimeLoop:
         did_infer: bool,
         tracking_report: LKTrackingReport,
         fan_state: FanState,
+        detector_call_type: str | None,
+        detector_call_resolution: int | None,
     ) -> None:
         loop_fps = self._metrics.fps
         effective_inference_fps = loop_fps / max(action.inference_interval, 1)
@@ -1384,6 +1414,7 @@ class RuntimeLoop:
         throttling = device_state.get("throttling") or {}
         raw_thermal_state = self._controller.last_raw_thermal_state
         control_thermal_state = self._controller.last_control_thermal_state
+        processed_frames = self._frame_id + 1
         record = LogRecord(
             timestamp=time.time(),
             frame_id=self._frame_id,
@@ -1413,6 +1444,20 @@ class RuntimeLoop:
             throttled_occurred=throttling.get("throttled_occurred"),
             soft_temp_limit_occurred=throttling.get("soft_temp_limit_occurred"),
             did_infer=did_infer,
+            detector_invocation_count=self._detector_invocation_count,
+            detector_invocation_ratio=(
+                self._detector_invocation_count / processed_frames
+            ),
+            full_detector_invocation_count=self._full_detector_invocation_count,
+            full_detector_invocation_ratio=(
+                self._full_detector_invocation_count / processed_frames
+            ),
+            roi_detector_invocation_count=self._roi_detector_invocation_count,
+            roi_detector_invocation_ratio=(
+                self._roi_detector_invocation_count / processed_frames
+            ),
+            detector_call_type=detector_call_type,
+            detector_call_resolution=detector_call_resolution,
             tracking_mode=tracking_report.mode,
             tracking_reason=tracking_report.reason,
             tracking_ms=tracking_report.tracking_ms,

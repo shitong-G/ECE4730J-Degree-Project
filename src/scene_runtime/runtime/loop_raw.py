@@ -82,6 +82,7 @@ class RuntimeLoop:
 
         self._frame_id = 0
         self._inference_counter = 0
+        self._detector_invocation_count = 0
         self._last_detections: list[Detection] = []
         self._prev_frame: np.ndarray | None = None
         self._current_action: RuntimeAction | None = None
@@ -134,6 +135,7 @@ class RuntimeLoop:
         if run_infer:
             with Timer() as t:
                 self._last_detections = self._engine.infer(frame, action)
+            self._detector_invocation_count += 1
             latency_ms = t.elapsed_ms
             self._metrics.record_latency(latency_ms)
             summary = detections_summary(self._last_detections)
@@ -162,6 +164,8 @@ class RuntimeLoop:
     ) -> None:
         loop_fps = self._metrics.fps
         effective_inference_fps = loop_fps / max(action.inference_interval, 1)
+        processed_frames = self._frame_id + 1
+        throttling = device_state.get("throttling") or {}
         record = LogRecord(
             timestamp=time.time(),
             frame_id=self._frame_id,
@@ -177,19 +181,48 @@ class RuntimeLoop:
             temp_c=device_state.get("temp_c"),
             freq_mhz_avg=device_state.get("freq_mhz_avg"),
             arm_clock_mhz=device_state.get("arm_clock_mhz"),
+            arm_clock_stale=device_state.get("arm_clock_stale"),
+            firmware_poll_ms=float(device_state.get("firmware_poll_ms") or 0.0),
             power_w=device_state.get("power_w"),
-            throttling_raw=(device_state.get("throttling") or {}).get("raw"),
-            under_voltage=(device_state.get("throttling") or {}).get("under_voltage"),
-            arm_freq_capped=(device_state.get("throttling") or {}).get("arm_freq_capped"),
-            currently_throttled=(device_state.get("throttling") or {}).get("currently_throttled"),
-            soft_temp_limit=(device_state.get("throttling") or {}).get("soft_temp_limit"),
+            throttling_raw=throttling.get("raw"),
+            throttling_stale=device_state.get("throttling_stale"),
+            under_voltage=throttling.get("under_voltage"),
+            arm_freq_capped=throttling.get("arm_freq_capped"),
+            currently_throttled=throttling.get("currently_throttled"),
+            soft_temp_limit=throttling.get("soft_temp_limit"),
+            under_voltage_occurred=throttling.get("under_voltage_occurred"),
+            arm_freq_capped_occurred=throttling.get("arm_freq_capped_occurred"),
+            throttled_occurred=throttling.get("throttled_occurred"),
+            soft_temp_limit_occurred=throttling.get("soft_temp_limit_occurred"),
             did_infer=did_infer,
+            detector_invocation_count=self._detector_invocation_count,
+            detector_invocation_ratio=self._detector_invocation_count / processed_frames,
+            full_detector_invocation_count=self._detector_invocation_count,
+            full_detector_invocation_ratio=self._detector_invocation_count / processed_frames,
+            roi_detector_invocation_count=0,
+            roi_detector_invocation_ratio=0.0,
+            detector_call_type="full" if did_infer else None,
+            detector_call_resolution=action.input_resolution if did_infer else None,
             tracking_mode="disabled",
             tracking_reason="disabled",
             tracking_ms=0.0,
+            tracking_track_count_before=0,
+            tracking_track_count_after=0,
+            tracking_failed_box_count=0,
             tracking_failure_ratio=0.0,
             tracking_mean_quality=1.0,
             tracking_should_refresh=False,
+            lk_quality_confirm_count=0,
+            lk_quality_confirm_deferred=False,
+            lk_quality_confirm_total_deferred=0,
+            roi_refresh_candidate=False,
+            roi_refresh_applied=False,
+            roi_refresh_reason=None,
+            roi_refresh_reject_reason=None,
+            roi_refresh_area_ratio=0.0,
+            roi_refresh_width_px=0.0,
+            roi_refresh_height_px=0.0,
+            roi_refresh_max_area_ratio=0.0,
             latency_ms=latency_ms,
             fps=loop_fps,
             loop_fps=loop_fps,

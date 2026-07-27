@@ -9,6 +9,7 @@ the first run performs an RT-DETR temperature warmup.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import shutil
@@ -125,7 +126,7 @@ def all_specs() -> list[ExperimentSpec]:
         ),
         ExperimentSpec(
             "int8_event_lk_roi_qthermal",
-            "Event LK + ROI, thermal-adaptive query budget (Q=64/48/40/32)",
+            "Event LK + ROI, query-only thermal adaptation (Q=64/48/40/32)",
             ("D",),
             "scene_track_lk",
             "dynamic_query_roi_family",
@@ -133,7 +134,7 @@ def all_specs() -> list[ExperimentSpec]:
         ),
         ExperimentSpec(
             "proposed_software",
-            "Full controller with runtime query-budget allocation",
+            "Full controller: thermal resolution/interval plus query allocation",
             ("D", "E"),
             "scene_thermal_interval_lk",
             "dynamic_query_adaptive_family",
@@ -260,6 +261,30 @@ def parse_args() -> argparse.Namespace:
         "--query-budget-hysteresis-c", type=float, default=4.0,
         help="Temperature hysteresis used by the adaptive query controller.",
     )
+    parser.add_argument(
+        "--thermal-normal-max-c",
+        type=float,
+        default=58.0,
+        help="Shared normal-to-warm boundary for every formal condition.",
+    )
+    parser.add_argument(
+        "--thermal-warm-max-c",
+        type=float,
+        default=66.0,
+        help="Shared warm-to-hot boundary for every formal condition.",
+    )
+    parser.add_argument(
+        "--thermal-critical-c",
+        type=float,
+        default=76.0,
+        help="Shared hot-to-critical boundary for every formal condition.",
+    )
+    parser.add_argument(
+        "--thermal-hysteresis-c",
+        type=float,
+        default=4.0,
+        help="Shared thermal-state hysteresis for every formal condition.",
+    )
     parser.add_argument("--fan-on-temp-c", type=float, default=68.0)
     parser.add_argument("--fan-off-temp-c", type=float, default=62.0)
     parser.add_argument("--fan-full-temp-c", type=float, default=82.0)
@@ -274,6 +299,15 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Fail on current or historical undervoltage before/after formal runs.",
+    )
+    parser.add_argument(
+        "--require-controller-coverage",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Require the proposed software run to observe both a 480-pixel "
+            "detector call and a thermal interval change."
+        ),
     )
     parser.add_argument("--evaluate-quality", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--make-plots", action=argparse.BooleanOptionalAction, default=True)
@@ -315,6 +349,16 @@ def validate_args(args: argparse.Namespace, specs: list[ExperimentSpec]) -> None
         raise ValueError("Fan thresholds must satisfy off <= on <= full")
     if not 0 <= args.fan_min_duty_cycle <= args.fan_max_duty_cycle <= 1:
         raise ValueError("Fan duty cycles must satisfy 0 <= min <= max <= 1")
+    if not (
+        args.thermal_normal_max_c
+        <= args.thermal_warm_max_c
+        <= args.thermal_critical_c
+    ):
+        raise ValueError(
+            "Shared thermal boundaries must satisfy normal <= warm <= critical"
+        )
+    if args.thermal_hysteresis_c < 0:
+        raise ValueError("--thermal-hysteresis-c cannot be negative")
     budgets = (
         args.query_budget_normal,
         args.query_budget_warm,
@@ -393,6 +437,18 @@ def build_command(
         command.append("--log-detections")
     if args.apply_runtime_actions:
         command.append("--apply-runtime-actions")
+    command.extend(
+        [
+            "--thermal-normal-max-c",
+            str(args.thermal_normal_max_c),
+            "--thermal-warm-max-c",
+            str(args.thermal_warm_max_c),
+            "--thermal-critical-c",
+            str(args.thermal_critical_c),
+            "--thermal-hysteresis-c",
+            str(args.thermal_hysteresis_c),
+        ]
+    )
     if spec.fixed_interval is not None:
         command.extend(
             [
@@ -499,6 +555,66 @@ def assert_no_undervoltage(context: str) -> None:
         f"throttled=0x{mask:x}",
         flush=True,
     )
+
+
+def observed_runtime_coverage(path: Path) -> dict[str, Any]:
+    """Summarize actual controller actions, not merely configured options."""
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    def counts(column: str, *, inferred_only: bool = False) -> dict[str, int]:
+        selected = rows
+        if inferred_only:
+            selected = [
+                row
+                for row in rows
+                if str(row.get("did_infer", "")).strip().lower() == "true"
+            ]
+        result: dict[str, int] = {}
+        for row in selected:
+            value = str(row.get(column, ""))
+            result[value] = result.get(value, 0) + 1
+        return result
+
+    return {
+        "frames": len(rows),
+        "detector_call_resolutions": counts("detector_call_resolution", inferred_only=True),
+        "inference_intervals": counts("inference_interval"),
+        "action_modes": counts("action_mode"),
+        "control_thermal_states": counts("control_thermal_state"),
+        "query_budgets": counts("query_budget_applied", inferred_only=True),
+    }
+
+
+def validate_controller_coverage(
+    spec: ExperimentSpec,
+    coverage: dict[str, Any],
+    *,
+    required: bool,
+) -> None:
+    """Fail a proposed-controller run that never exercises its new controls."""
+    if not required or spec.key != "proposed_software":
+        return
+    resolutions = coverage.get("detector_call_resolutions", {})
+    intervals = coverage.get("inference_intervals", {})
+    observed_480 = int(resolutions.get("480", 0))
+    observed_non_unit_interval = 0
+    for value, count in intervals.items():
+        try:
+            non_unit = float(value) != 1.0
+        except (TypeError, ValueError):
+            non_unit = bool(value)
+        if non_unit:
+            observed_non_unit_interval += count
+    if observed_480 <= 0 or observed_non_unit_interval <= 0:
+        raise RuntimeError(
+            "Proposed controller coverage is incomplete: expected at least "
+            "one 480-pixel detector call and one non-unit inference interval, "
+            f"observed resolutions={resolutions}, intervals={intervals}. "
+            "Use shared thermal thresholds or rerun with "
+            "--no-require-controller-coverage only if intentionally testing "
+            "a no-trigger case."
+        )
 
 
 def run_quality_analysis(suite_dir: Path, run_dirs: list[Path]) -> int:
@@ -666,6 +782,8 @@ def main() -> None:
             f"  detector interval: {spec.fixed_interval or 'controller/event'}\n"
             f"  query budget: "
             f"{'thermal-adaptive' if spec.temperature_query_budget else spec.query_budget_override or 'model/action default'}\n"
+            f"  shared thermal bands: normal<{args.thermal_normal_max_c:.1f}, "
+            f"warm<{args.thermal_warm_max_c:.1f}, critical>={args.thermal_critical_c:.1f}C\n"
             f"  LK: {'yes' if spec.enable_lk or 'lk' in spec.strategy else 'no'}\n"
             f"  formal PWM fan: {'yes' if spec.fan_control == 'enabled' else 'no'}\n"
             f"  pre-child temperature: {pre_temperature:.2f}C\n"
@@ -699,6 +817,9 @@ def main() -> None:
                 "detections_log": str(run_dir / "runtime_detections.jsonl"),
             }
         )
+        if output.exists():
+            coverage = observed_runtime_coverage(output)
+            run_meta["observed_coverage"] = coverage
         write_json(run_dir / "run_manifest.json", run_meta)
         manifest["runs"] = [
             item for item in manifest.get("runs", []) if item.get("key") != spec.key
@@ -713,6 +834,18 @@ def main() -> None:
         )
         if returncode:
             raise RuntimeError(f"{spec.key} failed with exit code {returncode}")
+        validate_controller_coverage(
+            spec,
+            run_meta.get("observed_coverage", {}),
+            required=args.require_controller_coverage,
+        )
+        if run_meta.get("observed_coverage"):
+            print(
+                f"[defense-suite] observed coverage {spec.key}: "
+                f"resolutions={run_meta['observed_coverage']['detector_call_resolutions']}; "
+                f"intervals={run_meta['observed_coverage']['inference_intervals']}",
+                flush=True,
+            )
         if args.power_preflight:
             assert_no_undervoltage(f"after {spec.key}")
 

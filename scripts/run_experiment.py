@@ -119,6 +119,30 @@ def parse_args() -> argparse.Namespace:
         help="Override detected temperature in Celsius for thermal policy testing",
     )
     p.add_argument(
+        "--thermal-normal-max-c",
+        type=float,
+        default=None,
+        help="Override the normal-to-warm thermal boundary for this run.",
+    )
+    p.add_argument(
+        "--thermal-warm-max-c",
+        type=float,
+        default=None,
+        help="Override the warm-to-hot thermal boundary for this run.",
+    )
+    p.add_argument(
+        "--thermal-critical-c",
+        type=float,
+        default=None,
+        help="Override the hot-to-critical thermal boundary for this run.",
+    )
+    p.add_argument(
+        "--thermal-hysteresis-c",
+        type=float,
+        default=None,
+        help="Override thermal-state hysteresis for this run.",
+    )
+    p.add_argument(
         "--enable-thread-sessions",
         action="store_true",
         help="Preload ONNX Runtime sessions for configured cpu thread counts",
@@ -269,6 +293,24 @@ def main() -> None:
         config.setdefault("thermal", {})["override_state"] = args.thermal_state
     if args.thermal_temp_c is not None:
         config.setdefault("thermal", {})["override_temp_c"] = args.thermal_temp_c
+    thermal_overrides = {
+        "normal_max_c": args.thermal_normal_max_c,
+        "warm_max_c": args.thermal_warm_max_c,
+        "critical_c": args.thermal_critical_c,
+        "hysteresis_c": args.thermal_hysteresis_c,
+    }
+    thermal_cfg = config.setdefault("thermal", {})
+    for key, value in thermal_overrides.items():
+        if value is not None:
+            if value < 0:
+                raise ValueError(f"--thermal-{key.replace('_', '-')} cannot be negative")
+            thermal_cfg[key] = value
+    if not (
+        float(thermal_cfg.get("normal_max_c", 65.0))
+        <= float(thermal_cfg.get("warm_max_c", 75.0))
+        <= float(thermal_cfg.get("critical_c", 82.0))
+    ):
+        raise ValueError("Thermal boundaries must satisfy normal_max_c <= warm_max_c <= critical_c")
     if args.enable_thread_sessions:
         config.setdefault("inference", {})["enable_thread_sessions"] = True
     if args.thread_session_counts:

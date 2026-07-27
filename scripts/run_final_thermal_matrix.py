@@ -46,7 +46,6 @@ from run_controlled_experiment_suite import (
     sha256,
     system_snapshot,
     verify_fan_hardware,
-    wait_for_normalised_temperature,
     write_json,
 )
 from run_core_ablation_suite import cool_to_start_temperature
@@ -125,18 +124,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=ROOT / "experiments" / "final_thermal_matrix")
     parser.add_argument("--run-id", default=datetime.now().strftime("final_thermal_%Y%m%d_%H%M%S"))
     parser.add_argument("--resume-dir", type=Path, default=None)
-    parser.add_argument("--cooldown-temp-c", type=float, default=50.0)
-    parser.add_argument("--cooldown-tolerance-c", type=float, default=0.5)
+    parser.add_argument(
+        "--start-temp-min-c", type=float, default=45.0,
+        help="Minimum permitted one-shot temperature reading before a formal run.",
+    )
+    parser.add_argument(
+        "--start-temp-max-c", type=float, default=50.0,
+        help="Maximum permitted one-shot temperature reading before a formal run.",
+    )
     parser.add_argument("--max-cooldown-min", type=float, default=8.0)
     parser.add_argument("--poll-sec", type=float, default=5.0)
-    parser.add_argument("--stable-samples", type=int, default=3)
-    parser.add_argument("--preheat-workers", type=int, default=4)
     parser.add_argument("--cooldown-fan-settle-sec", type=float, default=2.0)
     parser.add_argument("--temperature-trace-sec", type=float, default=1.0)
     parser.add_argument("--progress-sec", type=float, default=30.0)
     parser.add_argument("--max-total-hours", type=float, default=10.0)
     parser.add_argument("--startup-allowance-min", type=float, default=1.0)
-    parser.add_argument("--formal-start-max-drift-c", type=float, default=2.0)
     parser.add_argument("--query-budget-normal", type=int, default=64)
     parser.add_argument("--query-budget-warm", type=int, default=48)
     parser.add_argument("--query-budget-hot", type=int, default=40)
@@ -174,12 +176,10 @@ def expected_plan_minutes(args: argparse.Namespace, count: int) -> float:
 def validate_args(args: argparse.Namespace, specs: list[Condition]) -> None:
     if args.duration_min <= 0 or args.repeats < 1:
         raise ValueError("--duration-min must be positive and --repeats must be >= 1")
-    if args.max_cooldown_min <= 0 or args.max_total_hours <= 0 or args.stable_samples < 1:
+    if args.max_cooldown_min <= 0 or args.max_total_hours <= 0:
         raise ValueError("Cooldown and total-duration limits must be positive")
-    if args.cooldown_temp_c <= 0 or args.cooldown_tolerance_c < 0:
-        raise ValueError("Cooldown target must be positive and tolerance non-negative")
-    if args.formal_start_max_drift_c < 0:
-        raise ValueError("--formal-start-max-drift-c must be non-negative")
+    if args.start_temp_min_c <= 0 or args.start_temp_min_c > args.start_temp_max_c:
+        raise ValueError("Start window must satisfy 0 < --start-temp-min-c <= --start-temp-max-c")
     if not args.thermal_normal_max_c <= args.thermal_warm_max_c <= args.thermal_critical_c:
         raise ValueError("Thermal boundaries must satisfy normal <= warm <= critical")
     budgets = (args.query_budget_critical, args.query_budget_hot, args.query_budget_warm, args.query_budget_normal)
@@ -286,26 +286,14 @@ def observed_coverage(runtime_csv: Path) -> dict[str, dict[str, int]]:
 
 
 def cool_to_target(args: argparse.Namespace, trace_path: Path) -> tuple[list[dict[str, Any]], float]:
-    """Adapt the legacy cooldown helper to this script's explicit time budget."""
-    cooldown_args = argparse.Namespace(**vars(args), max_wait_min=args.max_cooldown_min)
-    return cool_to_start_temperature(cooldown_args, trace_path)
-
-
-def normalize_start_temperature(args: argparse.Namespace, trace_path: Path) -> tuple[list[dict[str, Any]], float | None]:
-    """Stabilize at the same target even if the board began unusually cool."""
-    conditioning_args = argparse.Namespace(
+    """Cool to the top of the accepted window; no stability sampling is used."""
+    cooldown_args = argparse.Namespace(
         **vars(args),
-        start_temp_c=args.cooldown_temp_c,
-        temp_tolerance_c=args.cooldown_tolerance_c,
+        cooldown_temp_c=args.start_temp_max_c,
+        cooldown_tolerance_c=0.0,
         max_wait_min=args.max_cooldown_min,
-        allow_temperature_timeout=False,
     )
-    samples, temperature = wait_for_normalised_temperature(conditioning_args)
-    with trace_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["timestamp_utc", "temp_c", "phase"])
-        writer.writeheader()
-        writer.writerows(samples)
-    return samples, temperature
+    return cool_to_start_temperature(cooldown_args, trace_path)
 
 
 def validate_full_controller(coverage: dict[str, dict[str, int]]) -> None:
@@ -396,10 +384,12 @@ def main() -> None:
             raise TimeoutError(f"Total suite budget exhausted before {run_key}; remaining={remaining_min:.1f} min")
 
         run_dir.mkdir()
-        cool_to_target(args, run_dir / "cooldown_trace.csv")
-        _, pre_temperature = normalize_start_temperature(
-            args, run_dir / "start_conditioning_trace.csv"
-        )
+        _, pre_temperature = cool_to_target(args, run_dir / "cooldown_trace.csv")
+        if not args.start_temp_min_c <= pre_temperature <= args.start_temp_max_c:
+            raise RuntimeError(
+                f"{run_key} pre-run temperature {pre_temperature:.2f}C is outside "
+                f"the permitted {args.start_temp_min_c:.1f}–{args.start_temp_max_c:.1f}C window."
+            )
         if args.power_preflight:
             assert_no_undervoltage(f"before {run_key}")
         output = run_dir / "runtime.csv"
@@ -432,11 +422,6 @@ def main() -> None:
         write_json(suite_dir / "manifest.json", manifest)
         if returncode:
             raise RuntimeError(f"{run_key} failed with exit code {returncode}")
-        if formal_start is None or abs(formal_start - args.cooldown_temp_c) > args.formal_start_max_drift_c:
-            raise RuntimeError(
-                f"{run_key} formal start temperature {formal_start}C is outside "
-                f"{args.cooldown_temp_c:.1f}±{args.formal_start_max_drift_c:.1f}C"
-            )
         if condition.key == "proposed_software":
             validate_full_controller(run_meta["observed_coverage"])
         if args.power_preflight:

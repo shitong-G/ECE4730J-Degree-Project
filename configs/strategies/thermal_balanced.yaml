@@ -18,9 +18,9 @@ runtime:
   default_cpu_threads: 4
 
 thermal:
-  normal_max_c: 80.0
-  warm_max_c: 84.0
-  critical_c: 87.0
+  normal_max_c: 65.0
+  warm_max_c: 75.0
+  critical_c: 82.0
   hysteresis_c: 2.5
   warm_hold_frames: 8
   hot_hold_frames: 10

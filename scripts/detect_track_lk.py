@@ -67,6 +67,8 @@ class Track:
     points: Optional[np.ndarray]
     age: int = 0
     quality: float = 1.0
+    frames_since_redetect: int = 0
+    edge_contact_frames: int = 0
 
     def to_detection(self) -> Detection:
         return Detection(self.bbox.copy(), self.class_id, self.score, self.track_id)
@@ -180,6 +182,12 @@ class LKMultiObjectTracker:
             refresh_iou: float = 0.30,
             min_box_side: int = 5,
             grid_size: int = 3,
+            redetect_interval: int = 5,
+            redetect_min_points: int = 8,
+            edge_refresh_margin_ratio: float = 0.02,
+            min_refresh_point_span_ratio: float = 0.18,
+            edge_exit_frames: int = 8,
+            edge_exit_min_area_ratio: float = 0.03,
     ) -> None:
         self.max_corners = max_corners
         self.min_valid_points = min_valid_points
@@ -189,6 +197,12 @@ class LKMultiObjectTracker:
         self.refresh_iou = refresh_iou
         self.min_box_side = min_box_side
         self.grid_size = grid_size
+        self.redetect_interval = redetect_interval
+        self.redetect_min_points = redetect_min_points
+        self.edge_refresh_margin_ratio = edge_refresh_margin_ratio
+        self.min_refresh_point_span_ratio = min_refresh_point_span_ratio
+        self.edge_exit_frames = edge_exit_frames
+        self.edge_exit_min_area_ratio = edge_exit_min_area_ratio
 
         self.previous_gray: Optional[np.ndarray] = None
         self.tracks: list[Track] = []
@@ -366,6 +380,8 @@ class LKMultiObjectTracker:
                 class_id=detection.class_id,
                 score=detection.score,
                 points=self._points_for_box(gray, bbox),
+                frames_since_redetect=0,
+                edge_contact_frames=0,
             )
 
             fresh_tracks.append(track)
@@ -523,18 +539,42 @@ class LKMultiObjectTracker:
         if updated_bbox[3] - updated_bbox[1] < self.min_box_side:
             return None, quality
 
-        refreshed_points = self._points_for_box(
-            current_gray,
-            updated_bbox,
+        near_edge = self._near_frame_edge(updated_bbox, width, height)
+        edge_contact_frames = (
+                track.edge_contact_frames + 1 if near_edge else 0
         )
-
         if (
-                refreshed_points is None
-                or len(refreshed_points) < self.min_valid_points
+                self.edge_exit_frames > 0
+                and edge_contact_frames >= self.edge_exit_frames
+                and self._area_ratio(updated_bbox, width, height)
+                >= self.edge_exit_min_area_ratio
         ):
-            refreshed_points = new_inliers.reshape(-1, 1, 2).astype(
-                np.float32
+            return None, quality
+
+        tracked_points = new_inliers.reshape(-1, 1, 2).astype(np.float32)
+        frames_since_redetect = track.frames_since_redetect + 1
+        should_redetect = (
+                (
+                        self.redetect_interval > 0
+                        and frames_since_redetect >= self.redetect_interval
+                )
+                or len(tracked_points) < self.redetect_min_points
+        )
+        can_redetect = (
+                not near_edge
+                and self._point_span_ratio(new_inliers, updated_bbox)
+                >= self.min_refresh_point_span_ratio
+        )
+        refreshed_points = tracked_points
+
+        if should_redetect and can_redetect:
+            redetected = self._points_for_box(
+                current_gray,
+                updated_bbox,
             )
+            if redetected is not None and len(redetected) >= self.min_valid_points:
+                refreshed_points = redetected
+                frames_since_redetect = 0
 
         return Track(
             track_id=track.track_id,
@@ -544,7 +584,40 @@ class LKMultiObjectTracker:
             points=refreshed_points,
             age=track.age + 1,
             quality=quality,
+            frames_since_redetect=frames_since_redetect,
+            edge_contact_frames=edge_contact_frames,
         ), quality
+
+    def _near_frame_edge(
+            self,
+            bbox: np.ndarray,
+            width: int,
+            height: int,
+    ) -> bool:
+        margin = self.edge_refresh_margin_ratio * float(max(width, height))
+        return bool(
+                bbox[0] <= margin
+                or bbox[1] <= margin
+                or bbox[2] >= width - 1 - margin
+                or bbox[3] >= height - 1 - margin
+        )
+
+    @staticmethod
+    def _point_span_ratio(points_xy: np.ndarray, bbox: np.ndarray) -> float:
+        if len(points_xy) < 2:
+            return 0.0
+        box_w = max(1.0, float(bbox[2] - bbox[0]))
+        box_h = max(1.0, float(bbox[3] - bbox[1]))
+        span = np.ptp(points_xy, axis=0)
+        return float(min(span[0] / box_w, span[1] / box_h))
+
+    @staticmethod
+    def _area_ratio(bbox: np.ndarray, width: int, height: int) -> float:
+        area = max(0.0, float(bbox[2] - bbox[0])) * max(
+            0.0,
+            float(bbox[3] - bbox[1]),
+        )
+        return area / max(1.0, float(width * height))
 
     def update(self, frame: np.ndarray) -> TrackerReport:
         current_gray = self._gray(frame)
@@ -971,6 +1044,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-track-failure-ratio", type=float, default=0.30)
     parser.add_argument("--min-valid-points", type=int, default=6)
     parser.add_argument("--refresh-iou", type=float, default=0.30)
+    parser.add_argument("--redetect-interval", type=int, default=5)
+    parser.add_argument("--redetect-min-points", type=int, default=8)
+    parser.add_argument("--edge-refresh-margin-ratio", type=float, default=0.02)
+    parser.add_argument("--min-refresh-point-span-ratio", type=float, default=0.18)
+    parser.add_argument("--edge-exit-frames", type=int, default=8)
+    parser.add_argument("--edge-exit-min-area-ratio", type=float, default=0.03)
 
     parser.add_argument("--gate-width", type=int, default=320)
     parser.add_argument("--motion-threshold", type=int, default=24)
@@ -1010,6 +1089,12 @@ def main() -> None:
             min_valid_points=args.min_valid_points,
             max_failure_ratio=args.max_track_failure_ratio,
             refresh_iou=args.refresh_iou,
+            redetect_interval=args.redetect_interval,
+            redetect_min_points=args.redetect_min_points,
+            edge_refresh_margin_ratio=args.edge_refresh_margin_ratio,
+            min_refresh_point_span_ratio=args.min_refresh_point_span_ratio,
+            edge_exit_frames=args.edge_exit_frames,
+            edge_exit_min_area_ratio=args.edge_exit_min_area_ratio,
         )
         gate = ResidualMotionGate(
             gate_width=args.gate_width,

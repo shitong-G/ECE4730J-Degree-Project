@@ -254,6 +254,16 @@ class RuntimeLoop:
                 win_size=int(tracking_cfg.get("lk_win_size", 15)),
                 max_level=int(tracking_cfg.get("lk_max_level", 2)),
                 max_iterations=int(tracking_cfg.get("lk_max_iterations", 15)),
+                edge_refresh_margin_ratio=float(
+                    tracking_cfg.get("lk_edge_refresh_margin_ratio", 0.02)
+                ),
+                min_refresh_point_span_ratio=float(
+                    tracking_cfg.get("lk_min_refresh_point_span_ratio", 0.18)
+                ),
+                edge_exit_frames=int(tracking_cfg.get("lk_edge_exit_frames", 8)),
+                edge_exit_min_area_ratio=float(
+                    tracking_cfg.get("lk_edge_exit_min_area_ratio", 0.03)
+                ),
             )
             if self._lk_tracking_enabled
             else None

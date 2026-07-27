@@ -44,6 +44,7 @@ class _Track:
     bbox_frame: np.ndarray
     points: np.ndarray | None
     frames_since_redetect: int = 0
+    edge_contact_frames: int = 0
 
 
 class SparseLKBoxTracker:
@@ -63,6 +64,10 @@ class SparseLKBoxTracker:
         win_size: int = 15,
         max_level: int = 2,
         max_iterations: int = 15,
+        edge_refresh_margin_ratio: float = 0.02,
+        min_refresh_point_span_ratio: float = 0.18,
+        edge_exit_frames: int = 8,
+        edge_exit_min_area_ratio: float = 0.03,
     ) -> None:
         self.max_corners = int(max_corners)
         self.min_valid_points = int(min_valid_points)
@@ -75,6 +80,10 @@ class SparseLKBoxTracker:
         self.win_size = int(win_size)
         self.max_level = int(max_level)
         self.max_iterations = int(max_iterations)
+        self.edge_refresh_margin_ratio = float(edge_refresh_margin_ratio)
+        self.min_refresh_point_span_ratio = float(min_refresh_point_span_ratio)
+        self.edge_exit_frames = int(edge_exit_frames)
+        self.edge_exit_min_area_ratio = float(edge_exit_min_area_ratio)
         self._previous_gray: np.ndarray | None = None
         self._tracks: list[_Track] = []
         self._last_input_resolution: int | None = None
@@ -105,6 +114,7 @@ class SparseLKBoxTracker:
                     bbox_frame=bbox,
                     points=self._points_for_box(gray, bbox),
                     frames_since_redetect=0,
+                    edge_contact_frames=0,
                 )
             )
         self._previous_gray = gray
@@ -309,6 +319,15 @@ class SparseLKBoxTracker:
         if bbox[2] - bbox[0] < self.min_box_side or bbox[3] - bbox[1] < self.min_box_side:
             return None, quality
 
+        near_edge = self._near_frame_edge(bbox, width, height)
+        edge_contact_frames = track.edge_contact_frames + 1 if near_edge else 0
+        if (
+            self.edge_exit_frames > 0
+            and edge_contact_frames >= self.edge_exit_frames
+            and self._area_ratio(bbox, width, height) >= self.edge_exit_min_area_ratio
+        ):
+            return None, quality
+
         tracked_points = new_xy[valid].reshape(-1, 1, 2).astype(np.float32)
         frames_since_redetect = track.frames_since_redetect + 1
         should_redetect = (
@@ -316,7 +335,11 @@ class SparseLKBoxTracker:
             or len(tracked_points) < self.redetect_min_points
         )
         points = tracked_points
-        if should_redetect:
+        can_redetect = (
+            not near_edge
+            and self._point_span_ratio(new_xy[valid], bbox) >= self.min_refresh_point_span_ratio
+        )
+        if should_redetect and can_redetect:
             refreshed = self._points_for_box(current_gray, bbox)
             if refreshed is not None and len(refreshed) >= self.min_valid_points:
                 points = refreshed
@@ -328,6 +351,7 @@ class SparseLKBoxTracker:
                 bbox,
                 points,
                 frames_since_redetect=frames_since_redetect,
+                edge_contact_frames=edge_contact_frames,
             ),
             quality,
         )
@@ -372,6 +396,29 @@ class SparseLKBoxTracker:
             dtype=np.float32,
         )
         return _clip_bbox(bbox, width, height)
+
+    def _near_frame_edge(self, bbox: np.ndarray, width: int, height: int) -> bool:
+        margin = self.edge_refresh_margin_ratio * float(max(width, height))
+        return bool(
+            bbox[0] <= margin
+            or bbox[1] <= margin
+            or bbox[2] >= width - 1 - margin
+            or bbox[3] >= height - 1 - margin
+        )
+
+    @staticmethod
+    def _point_span_ratio(points_xy: np.ndarray, bbox: np.ndarray) -> float:
+        if len(points_xy) < 2:
+            return 0.0
+        box_w = max(1.0, float(bbox[2] - bbox[0]))
+        box_h = max(1.0, float(bbox[3] - bbox[1]))
+        span = np.ptp(points_xy, axis=0)
+        return float(min(span[0] / box_w, span[1] / box_h))
+
+    @staticmethod
+    def _area_ratio(bbox: np.ndarray, width: int, height: int) -> float:
+        area = max(0.0, float(bbox[2] - bbox[0])) * max(0.0, float(bbox[3] - bbox[1]))
+        return area / max(1.0, float(width * height))
 
 
 def _clip_bbox(bbox: np.ndarray, width: int, height: int) -> np.ndarray | None:

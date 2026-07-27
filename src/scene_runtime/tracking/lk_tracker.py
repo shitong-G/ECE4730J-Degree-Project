@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import cv2
@@ -45,6 +46,7 @@ class _Track:
     points: np.ndarray | None
     frames_since_redetect: int = 0
     edge_contact_frames: int = 0
+    track_age_frames: int = 0
 
 
 class SparseLKBoxTracker:
@@ -64,10 +66,15 @@ class SparseLKBoxTracker:
         win_size: int = 15,
         max_level: int = 2,
         max_iterations: int = 15,
+        grid_size: int = 3,
+        robust_mad_multiplier: float = 2.5,
         edge_refresh_margin_ratio: float = 0.02,
         min_refresh_point_span_ratio: float = 0.18,
         edge_exit_frames: int = 8,
         edge_exit_min_area_ratio: float = 0.03,
+        exit_refresh_min_area_ratio: float = 0.01,
+        large_track_refresh_frames: int = 30,
+        large_track_refresh_area_ratio: float = 0.08,
     ) -> None:
         self.max_corners = int(max_corners)
         self.min_valid_points = int(min_valid_points)
@@ -80,10 +87,15 @@ class SparseLKBoxTracker:
         self.win_size = int(win_size)
         self.max_level = int(max_level)
         self.max_iterations = int(max_iterations)
+        self.grid_size = int(grid_size)
+        self.robust_mad_multiplier = float(robust_mad_multiplier)
         self.edge_refresh_margin_ratio = float(edge_refresh_margin_ratio)
         self.min_refresh_point_span_ratio = float(min_refresh_point_span_ratio)
         self.edge_exit_frames = int(edge_exit_frames)
         self.edge_exit_min_area_ratio = float(edge_exit_min_area_ratio)
+        self.exit_refresh_min_area_ratio = float(exit_refresh_min_area_ratio)
+        self.large_track_refresh_frames = int(large_track_refresh_frames)
+        self.large_track_refresh_area_ratio = float(large_track_refresh_area_ratio)
         self._previous_gray: np.ndarray | None = None
         self._tracks: list[_Track] = []
         self._last_input_resolution: int | None = None
@@ -115,6 +127,7 @@ class SparseLKBoxTracker:
                     points=self._points_for_box(gray, bbox),
                     frames_since_redetect=0,
                     edge_contact_frames=0,
+                    track_age_frames=0,
                 )
             )
         self._previous_gray = gray
@@ -160,8 +173,14 @@ class SparseLKBoxTracker:
         failed = before - len(survivors)
         failure_ratio = failed / max(1, before)
         mean_quality = float(np.mean(qualities)) if qualities else 0.0
-        should_refresh = failure_ratio > self.max_failure_ratio
-        reason = "lk_quality_degraded" if should_refresh else "lk_track"
+        exit_refresh = self._has_exit_refresh_failure(failed_boxes)
+        should_refresh = failure_ratio > self.max_failure_ratio or exit_refresh
+        if failure_ratio > self.max_failure_ratio:
+            reason = "lk_quality_degraded"
+        elif exit_refresh:
+            reason = "lk_track_exit_or_disappearance"
+        else:
+            reason = "lk_track"
         detections = self._tracks_to_detections()
         return detections, LKTrackingReport(
             mode="track",
@@ -190,6 +209,47 @@ class SparseLKBoxTracker:
         x1, y1, x2, y2 = clipped.astype(int)
         if x2 - x1 < self.min_box_side or y2 - y1 < self.min_box_side:
             return None
+
+        per_cell = max(1, math.ceil(self.max_corners / max(1, self.grid_size * self.grid_size)))
+        x_edges = np.linspace(x1, x2 + 1, self.grid_size + 1, dtype=int)
+        y_edges = np.linspace(y1, y2 + 1, self.grid_size + 1, dtype=int)
+        collected: list[np.ndarray] = []
+
+        for row in range(self.grid_size):
+            for col in range(self.grid_size):
+                cell_x1 = int(x_edges[col])
+                cell_x2 = int(x_edges[col + 1])
+                cell_y1 = int(y_edges[row])
+                cell_y2 = int(y_edges[row + 1])
+                if cell_x2 - cell_x1 < self.min_box_side or cell_y2 - cell_y1 < self.min_box_side:
+                    continue
+                mask = np.zeros_like(gray, dtype=np.uint8)
+                cv2.rectangle(
+                    mask,
+                    (cell_x1, cell_y1),
+                    (cell_x2 - 1, cell_y2 - 1),
+                    255,
+                    thickness=-1,
+                )
+                points = cv2.goodFeaturesToTrack(
+                    gray,
+                    maxCorners=per_cell,
+                    qualityLevel=0.01,
+                    minDistance=4,
+                    mask=mask,
+                    blockSize=7,
+                    useHarrisDetector=False,
+                )
+                if points is not None:
+                    collected.append(points)
+
+        if collected:
+            points = np.concatenate(collected, axis=0).astype(np.float32)
+            unique_xy = np.unique(np.round(points.reshape(-1, 2), decimals=2), axis=0)
+            points = unique_xy.reshape(-1, 1, 2).astype(np.float32)
+            if len(points) >= self.min_valid_points:
+                return points[: self.max_corners]
+
         mask = np.zeros_like(gray, dtype=np.uint8)
         cv2.rectangle(mask, (x1, y1), (x2, y2), 255, thickness=-1)
         return cv2.goodFeaturesToTrack(
@@ -308,7 +368,15 @@ class SparseLKBoxTracker:
         if valid_count < self.min_valid_points or quality < self.min_survival_ratio:
             return None, quality
 
-        shift = np.median(new_xy[valid] - old_xy[valid], axis=0).astype(np.float32)
+        old_valid = old_xy[valid]
+        new_valid = new_xy[valid]
+        shift, robust_inliers = self._robust_translation(old_valid, new_valid)
+        robust_count = int(robust_inliers.sum())
+        quality = robust_count / max(1, len(old_points))
+        if robust_count < self.min_valid_points or quality < self.min_survival_ratio:
+            return None, quality
+
+        new_inliers = new_valid[robust_inliers]
         bbox = track.bbox_frame + np.asarray(
             [shift[0], shift[1], shift[0], shift[1]],
             dtype=np.float32,
@@ -328,7 +396,15 @@ class SparseLKBoxTracker:
         ):
             return None, quality
 
-        tracked_points = new_xy[valid].reshape(-1, 1, 2).astype(np.float32)
+        track_age_frames = track.track_age_frames + 1
+        if (
+            self.large_track_refresh_frames > 0
+            and track_age_frames >= self.large_track_refresh_frames
+            and self._area_ratio(bbox, width, height) >= self.large_track_refresh_area_ratio
+        ):
+            return None, quality
+
+        tracked_points = new_inliers.reshape(-1, 1, 2).astype(np.float32)
         frames_since_redetect = track.frames_since_redetect + 1
         should_redetect = (
             (self.redetect_interval > 0 and frames_since_redetect >= self.redetect_interval)
@@ -337,7 +413,7 @@ class SparseLKBoxTracker:
         points = tracked_points
         can_redetect = (
             not near_edge
-            and self._point_span_ratio(new_xy[valid], bbox) >= self.min_refresh_point_span_ratio
+            and self._point_span_ratio(new_inliers, bbox) >= self.min_refresh_point_span_ratio
         )
         if should_redetect and can_redetect:
             refreshed = self._points_for_box(current_gray, bbox)
@@ -352,6 +428,7 @@ class SparseLKBoxTracker:
                 points,
                 frames_since_redetect=frames_since_redetect,
                 edge_contact_frames=edge_contact_frames,
+                track_age_frames=track_age_frames,
             ),
             quality,
         )
@@ -397,6 +474,21 @@ class SparseLKBoxTracker:
         )
         return _clip_bbox(bbox, width, height)
 
+    def _robust_translation(
+        self,
+        old_xy: np.ndarray,
+        new_xy: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        displacement = new_xy - old_xy
+        median_shift = np.median(displacement, axis=0)
+        residuals = np.linalg.norm(displacement - median_shift[None, :], axis=1)
+        mad = float(np.median(residuals))
+        threshold = max(1.0, self.robust_mad_multiplier * 1.4826 * mad)
+        inliers = residuals <= threshold
+        if int(inliers.sum()) >= self.min_valid_points:
+            median_shift = np.median(displacement[inliers], axis=0)
+        return median_shift.astype(np.float32), inliers
+
     def _near_frame_edge(self, bbox: np.ndarray, width: int, height: int) -> bool:
         margin = self.edge_refresh_margin_ratio * float(max(width, height))
         return bool(
@@ -419,6 +511,17 @@ class SparseLKBoxTracker:
     def _area_ratio(bbox: np.ndarray, width: int, height: int) -> float:
         area = max(0.0, float(bbox[2] - bbox[0])) * max(0.0, float(bbox[3] - bbox[1]))
         return area / max(1.0, float(width * height))
+
+    def _has_exit_refresh_failure(self, failed_boxes: list[np.ndarray]) -> bool:
+        if not failed_boxes or self._last_frame_shape is None:
+            return False
+        height, width = self._last_frame_shape
+        for box in failed_boxes:
+            if self._near_frame_edge(box, width, height):
+                return True
+            if self._area_ratio(box, width, height) >= self.exit_refresh_min_area_ratio:
+                return True
+        return False
 
 
 def _clip_bbox(bbox: np.ndarray, width: int, height: int) -> np.ndarray | None:

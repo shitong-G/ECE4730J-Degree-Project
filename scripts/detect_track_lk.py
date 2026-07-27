@@ -69,6 +69,7 @@ class Track:
     quality: float = 1.0
     frames_since_redetect: int = 0
     edge_contact_frames: int = 0
+    track_age_frames: int = 0
 
     def to_detection(self) -> Detection:
         return Detection(self.bbox.copy(), self.class_id, self.score, self.track_id)
@@ -190,6 +191,11 @@ class LKMultiObjectTracker:
             edge_exit_frames: int = 8,
             edge_exit_min_area_ratio: float = 0.03,
             exit_refresh_min_area_ratio: float = 0.01,
+            large_track_refresh_frames: int = 30,
+            large_track_refresh_area_ratio: float = 0.08,
+            win_size: int = 21,
+            max_level: int = 3,
+            max_iterations: int = 30,
     ) -> None:
         self.max_corners = max_corners
         self.min_valid_points = min_valid_points
@@ -206,6 +212,11 @@ class LKMultiObjectTracker:
         self.edge_exit_frames = edge_exit_frames
         self.edge_exit_min_area_ratio = edge_exit_min_area_ratio
         self.exit_refresh_min_area_ratio = exit_refresh_min_area_ratio
+        self.large_track_refresh_frames = large_track_refresh_frames
+        self.large_track_refresh_area_ratio = large_track_refresh_area_ratio
+        self.win_size = win_size
+        self.max_level = max_level
+        self.max_iterations = max_iterations
 
         self.previous_gray: Optional[np.ndarray] = None
         self.tracks: list[Track] = []
@@ -385,6 +396,7 @@ class LKMultiObjectTracker:
                 points=self._points_for_box(gray, bbox),
                 frames_since_redetect=0,
                 edge_contact_frames=0,
+                track_age_frames=0,
             )
 
             fresh_tracks.append(track)
@@ -447,11 +459,11 @@ class LKMultiObjectTracker:
             current_gray,
             track.points,
             None,
-            winSize=(21, 21),
-            maxLevel=3,
+            winSize=(self.win_size, self.win_size),
+            maxLevel=self.max_level,
             criteria=(
                 cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
-                30,
+                self.max_iterations,
                 0.01,
             ),
         )
@@ -464,11 +476,11 @@ class LKMultiObjectTracker:
             self.previous_gray,
             next_points,
             None,
-            winSize=(21, 21),
-            maxLevel=3,
+            winSize=(self.win_size, self.win_size),
+            maxLevel=self.max_level,
             criteria=(
                 cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
-                30,
+                self.max_iterations,
                 0.01,
             ),
         )
@@ -554,6 +566,15 @@ class LKMultiObjectTracker:
         ):
             return None, quality
 
+        track_age_frames = track.track_age_frames + 1
+        if (
+                self.large_track_refresh_frames > 0
+                and track_age_frames >= self.large_track_refresh_frames
+                and self._area_ratio(updated_bbox, width, height)
+                >= self.large_track_refresh_area_ratio
+        ):
+            return None, quality
+
         tracked_points = new_inliers.reshape(-1, 1, 2).astype(np.float32)
         frames_since_redetect = track.frames_since_redetect + 1
         should_redetect = (
@@ -589,6 +610,7 @@ class LKMultiObjectTracker:
             quality=quality,
             frames_since_redetect=frames_since_redetect,
             edge_contact_frames=edge_contact_frames,
+            track_age_frames=track_age_frames,
         ), quality
 
     def _near_frame_edge(
@@ -920,7 +942,7 @@ class DetectTrackController:
         return output, detector_latency_ms
 
     def process(self, frame: np.ndarray, frame_id: int) -> tuple[list[Detection], str, str, TrackerReport, GateReport, float]:
-        empty_tracker = TrackerReport(0.0, 1.0, [], 0, 0)
+        empty_tracker = TrackerReport(0.0, 1.0, [], [], 0, 0)
         empty_gate = GateReport(True, 0, 0.0, 0.0, 0)
 
         if self.previous_frame is None:
@@ -1050,6 +1072,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=Path, default=ROOT / "models" / "rtdetr_r18_lite_pi4_640.onnx")
     parser.add_argument("--model-template", default=None, help="Optional model template containing {resolution}.")
     parser.add_argument("--resolution", type=int, default=640)
+    parser.add_argument("--frame-width", type=int, default=0)
+    parser.add_argument("--frame-height", type=int, default=0)
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--score-threshold", type=float, default=0.5)
     parser.add_argument("--classes", type=parse_classes, default=None, help="Optional: person,car,bus or 0,2,5")
@@ -1070,6 +1094,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--edge-exit-frames", type=int, default=8)
     parser.add_argument("--edge-exit-min-area-ratio", type=float, default=0.03)
     parser.add_argument("--exit-refresh-min-area-ratio", type=float, default=0.01)
+    parser.add_argument("--large-track-refresh-frames", type=int, default=30)
+    parser.add_argument("--large-track-refresh-area-ratio", type=float, default=0.08)
+    parser.add_argument("--max-corners", type=int, default=54)
+    parser.add_argument("--win-size", type=int, default=21)
+    parser.add_argument("--max-level", type=int, default=3)
+    parser.add_argument("--max-iterations", type=int, default=30)
 
     parser.add_argument("--gate-width", type=int, default=320)
     parser.add_argument("--motion-threshold", type=int, default=24)
@@ -1090,6 +1120,8 @@ def main() -> None:
         raise ValueError("--frame-stride must be >= 1")
     if args.jpg_quality < 1 or args.jpg_quality > 100:
         raise ValueError("--jpg-quality must be between 1 and 100")
+    if (args.frame_width > 0) != (args.frame_height > 0):
+        raise ValueError("--frame-width and --frame-height must be set together")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     frames_dir = args.output_dir / "frames"
@@ -1106,6 +1138,7 @@ def main() -> None:
     controller: DetectTrackController | None = None
     if args.mode == "detect_track":
         tracker = LKMultiObjectTracker(
+            max_corners=args.max_corners,
             min_valid_points=args.min_valid_points,
             max_failure_ratio=args.max_track_failure_ratio,
             refresh_iou=args.refresh_iou,
@@ -1116,6 +1149,11 @@ def main() -> None:
             edge_exit_frames=args.edge_exit_frames,
             edge_exit_min_area_ratio=args.edge_exit_min_area_ratio,
             exit_refresh_min_area_ratio=args.exit_refresh_min_area_ratio,
+            large_track_refresh_frames=args.large_track_refresh_frames,
+            large_track_refresh_area_ratio=args.large_track_refresh_area_ratio,
+            win_size=args.win_size,
+            max_level=args.max_level,
+            max_iterations=args.max_iterations,
         )
         gate = ResidualMotionGate(
             gate_width=args.gate_width,
@@ -1154,6 +1192,12 @@ def main() -> None:
                 ok, frame = capture.read()
                 if not ok:
                     break
+                if args.frame_width > 0:
+                    frame = cv2.resize(
+                        frame,
+                        (args.frame_width, args.frame_height),
+                        interpolation=cv2.INTER_AREA,
+                    )
                 if source_frame_id % args.frame_stride != 0:
                     source_frame_id += 1
                     continue
@@ -1166,7 +1210,7 @@ def main() -> None:
                     total_ms = (time.perf_counter() - start) * 1000.0
                     mode = "DETECT"
                     reason = "detect_only"
-                    tracker_report = TrackerReport(0.0, 1.0, [], 0, 0)
+                    tracker_report = TrackerReport(0.0, 1.0, [], [], 0, 0)
                     gate_report = GateReport(True, 0, 0.0, 0.0, 0)
                     detector_call_count = detector_calls + 1
                 else:

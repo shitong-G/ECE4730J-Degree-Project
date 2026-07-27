@@ -85,6 +85,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true", help="Simulate inference without ONNX model")
     p.add_argument("--duration-min", type=float, default=15.0)
     p.add_argument(
+        "--max-frames",
+        type=int,
+        default=0,
+        help="Stop after this many input frames; 0 uses the normal duration/video limit.",
+    )
+    p.add_argument(
         "--warmup-until-temp-c",
         type=float,
         default=None,
@@ -193,6 +199,18 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--lk-max-failure-ratio", type=float, default=None)
     p.add_argument("--lk-min-valid-points", type=int, default=None)
+    p.add_argument(
+        "--lk-large-track-refresh-frames",
+        type=int,
+        default=None,
+        help="Override the large-track LK-only lifetime; use 0 to disable for ablation.",
+    )
+    p.add_argument(
+        "--lk-large-track-refresh-area-ratio",
+        type=float,
+        default=None,
+        help="Override the minimum frame-area ratio for large-track refresh.",
+    )
     p.add_argument(
         "--fan-control",
         choices=["config", "enabled", "disabled"],
@@ -342,6 +360,18 @@ def main() -> None:
         config.setdefault("tracking", {})["lk_max_failure_ratio"] = args.lk_max_failure_ratio
     if args.lk_min_valid_points is not None:
         config.setdefault("tracking", {})["lk_min_valid_points"] = args.lk_min_valid_points
+    if args.lk_large_track_refresh_frames is not None:
+        if args.lk_large_track_refresh_frames < 0:
+            raise ValueError("--lk-large-track-refresh-frames cannot be negative")
+        config.setdefault("tracking", {})[
+            "lk_large_track_refresh_frames"
+        ] = args.lk_large_track_refresh_frames
+    if args.lk_large_track_refresh_area_ratio is not None:
+        if not 0.0 <= args.lk_large_track_refresh_area_ratio <= 1.0:
+            raise ValueError("--lk-large-track-refresh-area-ratio must be between 0 and 1")
+        config.setdefault("tracking", {})[
+            "lk_large_track_refresh_area_ratio"
+        ] = args.lk_large_track_refresh_area_ratio
     if args.query_budget_override is not None:
         if args.query_budget_override < 1:
             raise ValueError("--query-budget-override must be positive")
@@ -414,7 +444,9 @@ def main() -> None:
         )
 
     duration_sec = args.duration_min * 60.0
-    max_frames = int(duration_sec * 10) if args.dry_run else None
+    if args.max_frames < 0:
+        raise ValueError("--max-frames cannot be negative")
+    max_frames = args.max_frames or (int(duration_sec * 10) if args.dry_run else None)
     camera_cfg = config.get("camera", {})
     use_camera = args.camera or (None if args.video else camera_cfg.get("backend"))
     if use_camera == "video":

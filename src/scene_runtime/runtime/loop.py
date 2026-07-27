@@ -254,6 +254,10 @@ class RuntimeLoop:
                 win_size=int(tracking_cfg.get("lk_win_size", 15)),
                 max_level=int(tracking_cfg.get("lk_max_level", 2)),
                 max_iterations=int(tracking_cfg.get("lk_max_iterations", 15)),
+                grid_size=int(tracking_cfg.get("lk_grid_size", 3)),
+                robust_mad_multiplier=float(
+                    tracking_cfg.get("lk_robust_mad_multiplier", 2.5)
+                ),
                 edge_refresh_margin_ratio=float(
                     tracking_cfg.get("lk_edge_refresh_margin_ratio", 0.02)
                 ),
@@ -263,6 +267,15 @@ class RuntimeLoop:
                 edge_exit_frames=int(tracking_cfg.get("lk_edge_exit_frames", 8)),
                 edge_exit_min_area_ratio=float(
                     tracking_cfg.get("lk_edge_exit_min_area_ratio", 0.03)
+                ),
+                exit_refresh_min_area_ratio=float(
+                    tracking_cfg.get("lk_exit_refresh_min_area_ratio", 0.01)
+                ),
+                large_track_refresh_frames=int(
+                    tracking_cfg.get("lk_large_track_refresh_frames", 30)
+                ),
+                large_track_refresh_area_ratio=float(
+                    tracking_cfg.get("lk_large_track_refresh_area_ratio", 0.08)
                 ),
             )
             if self._lk_tracking_enabled
@@ -1206,7 +1219,8 @@ class RuntimeLoop:
     ) -> None:
         """Update tracking_report when event-triggered scene logic wants RT-DETR."""
         if tracking_report.should_refresh:
-            tracking_report.reason = "lk_tracking_quality_degraded"
+            if tracking_report.reason in {"lk_track", "lk_quality_degraded"}:
+                tracking_report.reason = "lk_tracking_quality_degraded"
             tracking_report.refresh_boxes_frame = list(tracking_report.failed_boxes_frame)
             return
 

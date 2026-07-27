@@ -51,8 +51,17 @@ tracking:
   lk_win_size: 15
   lk_max_level: 2
   lk_max_iterations: 15
+  lk_grid_size: 3
+  lk_robust_mad_multiplier: 2.5
   lk_redetect_interval: 5
   lk_redetect_min_points: 8
+  lk_edge_refresh_margin_ratio: 0.02
+  lk_min_refresh_point_span_ratio: 0.18
+  lk_edge_exit_frames: 8
+  lk_edge_exit_min_area_ratio: 0.03
+  lk_exit_refresh_min_area_ratio: 0.01
+  lk_large_track_refresh_frames: 30
+  lk_large_track_refresh_area_ratio: 0.08
   lk_quality_confirm_enabled: true
   lk_quality_confirm_frames: 1
   lk_quality_confirm_max_failure_ratio: 0.60

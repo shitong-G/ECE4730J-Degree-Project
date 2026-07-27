@@ -79,6 +79,7 @@ class TrackerReport:
     failure_ratio: float
     mean_quality: float
     failed_ids: list[int]
+    failed_boxes: list[np.ndarray]
     before_count: int
     after_count: int
 
@@ -188,6 +189,7 @@ class LKMultiObjectTracker:
             min_refresh_point_span_ratio: float = 0.18,
             edge_exit_frames: int = 8,
             edge_exit_min_area_ratio: float = 0.03,
+            exit_refresh_min_area_ratio: float = 0.01,
     ) -> None:
         self.max_corners = max_corners
         self.min_valid_points = min_valid_points
@@ -203,6 +205,7 @@ class LKMultiObjectTracker:
         self.min_refresh_point_span_ratio = min_refresh_point_span_ratio
         self.edge_exit_frames = edge_exit_frames
         self.edge_exit_min_area_ratio = edge_exit_min_area_ratio
+        self.exit_refresh_min_area_ratio = exit_refresh_min_area_ratio
 
         self.previous_gray: Optional[np.ndarray] = None
         self.tracks: list[Track] = []
@@ -619,20 +622,32 @@ class LKMultiObjectTracker:
         )
         return area / max(1.0, float(width * height))
 
+    def _has_exit_refresh_failure(self, failed_boxes: Sequence[np.ndarray]) -> bool:
+        if not failed_boxes or self.previous_gray is None:
+            return False
+        height, width = self.previous_gray.shape
+        for box in failed_boxes:
+            if self._near_frame_edge(box, width, height):
+                return True
+            if self._area_ratio(box, width, height) >= self.exit_refresh_min_area_ratio:
+                return True
+        return False
+
     def update(self, frame: np.ndarray) -> TrackerReport:
         current_gray = self._gray(frame)
         before = len(self.tracks)
 
         if self.previous_gray is None:
             self.previous_gray = current_gray
-            return TrackerReport(1.0, 0.0, [], before, before)
+            return TrackerReport(1.0, 0.0, [], [], before, before)
 
         if before == 0:
             self.previous_gray = current_gray
-            return TrackerReport(0.0, 1.0, [], 0, 0)
+            return TrackerReport(0.0, 1.0, [], [], 0, 0)
 
         survivors: list[Track] = []
         failed_ids: list[int] = []
+        failed_boxes: list[np.ndarray] = []
         qualities: list[float] = []
 
         for track in self.tracks:
@@ -642,6 +657,7 @@ class LKMultiObjectTracker:
 
             if updated is None:
                 failed_ids.append(track.track_id)
+                failed_boxes.append(track.bbox.copy())
             else:
                 survivors.append(updated)
 
@@ -652,12 +668,15 @@ class LKMultiObjectTracker:
             failure_ratio=len(failed_ids) / max(1, before),
             mean_quality=float(np.mean(qualities)) if qualities else 0.0,
             failed_ids=failed_ids,
+            failed_boxes=failed_boxes,
             before_count=before,
             after_count=len(survivors),
         )
 
     def needs_refresh(self, report: TrackerReport) -> bool:
-        return report.failure_ratio > self.max_failure_ratio
+        return report.failure_ratio > self.max_failure_ratio or self._has_exit_refresh_failure(
+            report.failed_boxes
+        )
 
     def detections(self) -> list[Detection]:
         return [track.to_detection() for track in self.tracks]
@@ -1050,6 +1069,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-refresh-point-span-ratio", type=float, default=0.18)
     parser.add_argument("--edge-exit-frames", type=int, default=8)
     parser.add_argument("--edge-exit-min-area-ratio", type=float, default=0.03)
+    parser.add_argument("--exit-refresh-min-area-ratio", type=float, default=0.01)
 
     parser.add_argument("--gate-width", type=int, default=320)
     parser.add_argument("--motion-threshold", type=int, default=24)
@@ -1095,6 +1115,7 @@ def main() -> None:
             min_refresh_point_span_ratio=args.min_refresh_point_span_ratio,
             edge_exit_frames=args.edge_exit_frames,
             edge_exit_min_area_ratio=args.edge_exit_min_area_ratio,
+            exit_refresh_min_area_ratio=args.exit_refresh_min_area_ratio,
         )
         gate = ResidualMotionGate(
             gate_width=args.gate_width,

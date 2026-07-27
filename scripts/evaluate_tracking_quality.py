@@ -21,12 +21,24 @@ sys.path.insert(0, str(ROOT / "src"))
 from scene_runtime.controller.actions import RuntimeAction
 from scene_runtime.inference.onnx_engine import ONNXRTDETREngine
 from scene_runtime.inference.postprocess import Detection
+from scene_runtime.runtime.config import load_config
 from scene_runtime.tracking import LKTrackingReport, SparseLKBoxTracker
 from scene_runtime.utils.video import FrameSource
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Temporal tracking quality evaluation")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=ROOT / "configs" / "raspberry_pi4.yaml",
+        help="Runtime config used to load LK tracker parameters.",
+    )
+    parser.add_argument(
+        "--strategy",
+        default="scene_track_lk",
+        help="Strategy yaml used to load LK tracker parameters.",
+    )
     parser.add_argument("--video", type=Path, default=ROOT / "data" / "sample.mp4")
     parser.add_argument("--model", type=Path, default=ROOT / "models" / "rtdetr_r18_lite_pi4_640.onnx")
     parser.add_argument(
@@ -52,6 +64,41 @@ def parse_args() -> argparse.Namespace:
         default=ROOT / "experiments" / "results" / "tracking_quality",
     )
     return parser.parse_args()
+
+
+def _create_tracker(args: argparse.Namespace) -> SparseLKBoxTracker:
+    tracking_cfg = load_config(args.config, args.strategy).get("tracking", {})
+    return SparseLKBoxTracker(
+        max_corners=int(tracking_cfg.get("lk_max_corners", 40)),
+        min_valid_points=int(tracking_cfg.get("lk_min_valid_points", 5)),
+        min_survival_ratio=float(tracking_cfg.get("lk_min_survival_ratio", 0.35)),
+        max_forward_backward_error=float(
+            tracking_cfg.get("lk_max_forward_backward_error", 1.5)
+        ),
+        max_failure_ratio=float(tracking_cfg.get("lk_max_failure_ratio", 0.30)),
+        redetect_interval=int(tracking_cfg.get("lk_redetect_interval", 5)),
+        redetect_min_points=int(tracking_cfg.get("lk_redetect_min_points", 8)),
+        win_size=int(tracking_cfg.get("lk_win_size", 15)),
+        max_level=int(tracking_cfg.get("lk_max_level", 2)),
+        max_iterations=int(tracking_cfg.get("lk_max_iterations", 15)),
+        grid_size=int(tracking_cfg.get("lk_grid_size", 3)),
+        robust_mad_multiplier=float(
+            tracking_cfg.get("lk_robust_mad_multiplier", 2.5)
+        ),
+        edge_refresh_margin_ratio=float(
+            tracking_cfg.get("lk_edge_refresh_margin_ratio", 0.02)
+        ),
+        min_refresh_point_span_ratio=float(
+            tracking_cfg.get("lk_min_refresh_point_span_ratio", 0.18)
+        ),
+        edge_exit_frames=int(tracking_cfg.get("lk_edge_exit_frames", 8)),
+        edge_exit_min_area_ratio=float(
+            tracking_cfg.get("lk_edge_exit_min_area_ratio", 0.03)
+        ),
+        exit_refresh_min_area_ratio=float(
+            tracking_cfg.get("lk_exit_refresh_min_area_ratio", 0.01)
+        ),
+    )
 
 
 def _parse_policies(text: str) -> list[str]:
@@ -170,7 +217,7 @@ def _evaluate_policy(
     args: argparse.Namespace,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     last_detections: list[Detection] = []
-    tracker = SparseLKBoxTracker() if policy == "lk_track" else None
+    tracker = _create_tracker(args) if policy == "lk_track" else None
     detector_calls = 0
     detector_latencies: list[float] = []
     total_latencies: list[float] = []

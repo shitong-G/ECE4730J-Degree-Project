@@ -132,6 +132,13 @@ def parse_args() -> argparse.Namespace:
         "--start-temp-max-c", type=float, default=50.0,
         help="Maximum permitted one-shot temperature reading before a formal run.",
     )
+    parser.add_argument(
+        "--start-temp-reading-tolerance-c", type=float, default=0.5,
+        help=(
+            "One-shot sensor tolerance applied only below --start-temp-min-c; "
+            "default accepts 44.5–50.0C for the requested 45–50C window."
+        ),
+    )
     parser.add_argument("--max-cooldown-min", type=float, default=8.0)
     parser.add_argument("--poll-sec", type=float, default=5.0)
     parser.add_argument("--cooldown-fan-settle-sec", type=float, default=2.0)
@@ -180,6 +187,8 @@ def validate_args(args: argparse.Namespace, specs: list[Condition]) -> None:
         raise ValueError("Cooldown and total-duration limits must be positive")
     if args.start_temp_min_c <= 0 or args.start_temp_min_c > args.start_temp_max_c:
         raise ValueError("Start window must satisfy 0 < --start-temp-min-c <= --start-temp-max-c")
+    if args.start_temp_reading_tolerance_c < 0:
+        raise ValueError("--start-temp-reading-tolerance-c must be non-negative")
     if not args.thermal_normal_max_c <= args.thermal_warm_max_c <= args.thermal_critical_c:
         raise ValueError("Thermal boundaries must satisfy normal <= warm <= critical")
     budgets = (args.query_budget_critical, args.query_budget_hot, args.query_budget_warm, args.query_budget_normal)
@@ -399,10 +408,12 @@ def main() -> None:
 
         run_dir.mkdir()
         _, pre_temperature = cool_to_target(args, run_dir / "cooldown_trace.csv")
-        if not args.start_temp_min_c <= pre_temperature <= args.start_temp_max_c:
+        accepted_min = args.start_temp_min_c - args.start_temp_reading_tolerance_c
+        if not accepted_min <= pre_temperature <= args.start_temp_max_c:
             raise RuntimeError(
                 f"{run_key} pre-run temperature {pre_temperature:.2f}C is outside "
-                f"the permitted {args.start_temp_min_c:.1f}–{args.start_temp_max_c:.1f}C window."
+                f"the permitted {accepted_min:.1f}–{args.start_temp_max_c:.1f}C "
+                "one-shot sensor window."
             )
         if args.power_preflight:
             assert_no_undervoltage(f"before {run_key}")

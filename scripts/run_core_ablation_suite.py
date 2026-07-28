@@ -319,7 +319,13 @@ def cool_to_start_temperature(
                 f"[core-suite] cooling: {temperature:.2f}C > {upper:.2f}C ({mode})",
                 flush=True,
             )
-            time.sleep(args.poll_sec)
+            # Full-speed fan cooling can cross a narrow start-temperature
+            # window in one five-second polling interval.  Sample at 1 Hz
+            # close to the target so the fan can be released before a large
+            # undershoot, while retaining the normal cadence when far away.
+            remaining_c = temperature - upper
+            sleep_sec = 1.0 if remaining_c <= 2.0 else args.poll_sec
+            time.sleep(max(0.5, sleep_sec))
     finally:
         if controller is not None:
             controller.close()

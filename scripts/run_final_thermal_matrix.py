@@ -141,6 +141,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-cooldown-min", type=float, default=8.0)
     parser.add_argument("--poll-sec", type=float, default=5.0)
+    parser.add_argument(
+        "--preheat-workers", type=int, default=4,
+        help="CPU workers used only to raise an unusually cool board to the start window.",
+    )
     parser.add_argument("--cooldown-fan-settle-sec", type=float, default=2.0)
     parser.add_argument("--temperature-trace-sec", type=float, default=1.0)
     parser.add_argument("--progress-sec", type=float, default=30.0)
@@ -183,7 +187,7 @@ def expected_plan_minutes(args: argparse.Namespace, count: int) -> float:
 def validate_args(args: argparse.Namespace, specs: list[Condition]) -> None:
     if args.duration_min <= 0 or args.repeats < 1:
         raise ValueError("--duration-min must be positive and --repeats must be >= 1")
-    if args.max_cooldown_min <= 0 or args.max_total_hours <= 0:
+    if args.max_cooldown_min <= 0 or args.max_total_hours <= 0 or args.preheat_workers < 1:
         raise ValueError("Cooldown and total-duration limits must be positive")
     if args.start_temp_min_c <= 0 or args.start_temp_min_c > args.start_temp_max_c:
         raise ValueError("Start window must satisfy 0 < --start-temp-min-c <= --start-temp-max-c")
@@ -305,6 +309,84 @@ def cool_to_target(args: argparse.Namespace, trace_path: Path) -> tuple[list[dic
     return cool_to_start_temperature(cooldown_args, trace_path)
 
 
+def preheat_to_minimum(args: argparse.Namespace, trace_path: Path) -> float:
+    """Use bounded CPU work only when the board starts colder than the window."""
+    deadline = time.monotonic() + args.max_cooldown_min * 60.0
+    workers = [
+        subprocess.Popen([sys.executable, "-c", "while True: x = 1234567 * 7654321"])
+        for _ in range(args.preheat_workers)
+    ]
+    samples: list[dict[str, Any]] = []
+    accepted: float | None = None
+    try:
+        while True:
+            temperature = cpu_temp_c()
+            if temperature is None:
+                raise RuntimeError("CPU temperature is unavailable during start preheat")
+            samples.append({
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "temp_c": temperature,
+                "target_min_c": args.start_temp_min_c,
+                "phase": "cpu_preheat",
+            })
+            if temperature >= args.start_temp_min_c:
+                accepted = temperature
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"CPU did not reach {args.start_temp_min_c:.1f}C within "
+                    f"{args.max_cooldown_min:.1f} min of controlled preheat"
+                )
+            print(
+                f"[final-matrix] preheating: {temperature:.2f}C < "
+                f"{args.start_temp_min_c:.2f}C ({args.preheat_workers} workers)",
+                flush=True,
+            )
+            time.sleep(1.0)
+    finally:
+        for worker in workers:
+            if worker.poll() is None:
+                worker.terminate()
+        for worker in workers:
+            try:
+                worker.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                worker.kill()
+                worker.wait()
+    with trace_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["timestamp_utc", "temp_c", "target_min_c", "phase"])
+        writer.writeheader()
+        writer.writerows(samples)
+    if accepted is None:
+        raise RuntimeError("CPU preheat ended without a valid temperature reading")
+    return accepted
+
+
+def condition_start_temperature(args: argparse.Namespace, run_dir: Path) -> float:
+    """Bring the board into the one-shot 45–50C start window without settling."""
+    accepted_min = args.start_temp_min_c - args.start_temp_reading_tolerance_c
+    temperature = cpu_temp_c()
+    if temperature is None:
+        raise RuntimeError("CPU temperature is unavailable before start conditioning")
+    for attempt in range(1, 4):
+        if accepted_min <= temperature <= args.start_temp_max_c:
+            return temperature
+        if temperature > args.start_temp_max_c:
+            _, temperature = cool_to_target(
+                args,
+                run_dir / ("cooldown_trace.csv" if attempt == 1 else f"cooldown_retry_{attempt}.csv"),
+            )
+        else:
+            temperature = preheat_to_minimum(
+                args,
+                run_dir / f"preheat_trace_{attempt}.csv",
+            )
+    raise RuntimeError(
+        f"Could not condition start temperature into {accepted_min:.1f}–"
+        f"{args.start_temp_max_c:.1f}C after controlled cooling/preheat; last={temperature:.2f}C"
+    )
+
+
 def validate_full_controller(coverage: dict[str, dict[str, int]]) -> None:
     intervals = coverage["inference_intervals"]
     budgets = coverage["query_budgets"]
@@ -407,7 +489,7 @@ def main() -> None:
             raise TimeoutError(f"Total suite budget exhausted before {run_key}; remaining={remaining_min:.1f} min")
 
         run_dir.mkdir()
-        _, pre_temperature = cool_to_target(args, run_dir / "cooldown_trace.csv")
+        pre_temperature = condition_start_temperature(args, run_dir)
         accepted_min = args.start_temp_min_c - args.start_temp_reading_tolerance_c
         if not accepted_min <= pre_temperature <= args.start_temp_max_c:
             raise RuntimeError(

@@ -283,6 +283,7 @@ def cool_to_start_temperature(
     deadline = time.monotonic() + args.max_wait_min * 60.0
     samples: list[dict[str, Any]] = []
     controller = None
+    accepted_temperature: float | None = None
     try:
         while True:
             temperature = cpu_temp_c()
@@ -298,6 +299,12 @@ def cool_to_start_temperature(
                 }
             )
             if temperature <= upper:
+                # This is the only reading used to decide that cooldown has
+                # succeeded.  Do not replace it with a second reading after
+                # the fan is released: thermal-sensor jitter and a short heat
+                # rebound can otherwise turn a valid cooldown into a false
+                # failure.
+                accepted_temperature = temperature
                 break
             if time.monotonic() >= deadline:
                 raise TimeoutError(
@@ -324,10 +331,9 @@ def cool_to_start_temperature(
         writer = csv.DictWriter(handle, fieldnames=list(samples[0].keys()))
         writer.writeheader()
         writer.writerows(samples)
-    final_temperature = cpu_temp_c()
-    if final_temperature is None:
-        raise RuntimeError("CPU temperature became unavailable after cooldown")
-    return samples, final_temperature
+    if accepted_temperature is None:
+        raise RuntimeError("CPU temperature became unavailable during cooldown")
+    return samples, accepted_temperature
 
 
 def print_plan(args: argparse.Namespace, specs: list[ExperimentSpec]) -> None:

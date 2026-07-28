@@ -377,7 +377,21 @@ def main() -> None:
             print(f"[final-matrix] keeping completed {run_key}", flush=True)
             continue
         if run_dir.exists():
-            raise RuntimeError(f"Refusing to overwrite incomplete run directory: {run_dir}")
+            # Preserve partial traces (for example, a cooldown that reached its
+            # target immediately before an interrupted run) and retry the
+            # condition on resume instead of requiring a manual filesystem edit.
+            backup = suite_dir / (
+                f"{run_key}_incomplete_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+            shutil.move(str(run_dir), str(backup))
+            manifest.setdefault("preserved_incomplete_runs", []).append(
+                {"run_key": run_key, "path": str(backup)}
+            )
+            write_json(suite_dir / "manifest.json", manifest)
+            print(
+                f"[final-matrix] preserved incomplete {run_key} at {backup.name}; retrying it",
+                flush=True,
+            )
         remaining_min = (args.max_total_hours * 3600.0 - (time.monotonic() - started)) / 60.0
         minimum_needed = args.duration_min + args.startup_allowance_min
         if remaining_min < minimum_needed:

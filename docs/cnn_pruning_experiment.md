@@ -40,7 +40,21 @@ The pruning methods tested were:
 | Random | random structured pruning baseline |
 
 For Raspberry Pi deployment, `configs/raspberry_pi4_pruned_l1_r20.yaml` points
-to the generated L1 20% ONNX files for 320, 480, and 640 input sizes.
+to the L1 20% ONNX files under `models/`:
+
+```text
+models/rtdetr_r18_lite_l1_r20_320.onnx
+models/rtdetr_r18_lite_l1_r20_480.onnx
+models/rtdetr_r18_lite_l1_r20_640.onnx
+```
+
+Static INT8 siblings (same stem + `_int8`) are also available:
+
+```text
+models/rtdetr_r18_lite_l1_r20_320_int8.onnx
+models/rtdetr_r18_lite_l1_r20_480_int8.onnx
+models/rtdetr_r18_lite_l1_r20_640_int8.onnx
+```
 
 ## Commands
 

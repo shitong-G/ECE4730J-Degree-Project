@@ -94,6 +94,7 @@ def conditions(args: argparse.Namespace) -> list[SotaCondition]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "raspberry_pi4.yaml")
     parser.add_argument("--video", type=Path, default=ROOT / "data" / "sample3.mp4")
     parser.add_argument("--models", default="all", help="Comma-separated keys or all")
     parser.add_argument("--max-frames", type=int, default=600)
@@ -154,7 +155,7 @@ def validate_args(args: argparse.Namespace, specs: list[SotaCondition]) -> None:
         raise ValueError("Set either --max-frames or --duration-min")
     if args.start_temp_min_c <= 0 or args.start_temp_min_c > args.start_temp_max_c:
         raise ValueError("Start window must satisfy 0 < --start-temp-min-c <= --start-temp-max-c")
-    missing = [str(path) for path in [args.video, *(spec.model for spec in specs)] if not path.exists()]
+    missing = [str(path) for path in [args.config, args.video, *(spec.model for spec in specs)] if not path.exists()]
     if missing:
         raise FileNotFoundError("Required input(s) not found: " + ", ".join(missing))
     planned = expected_plan_minutes(args, len(specs) * args.repeats)

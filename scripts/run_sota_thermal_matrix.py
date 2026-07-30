@@ -38,6 +38,16 @@ from run_final_thermal_matrix import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def jsonable(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [jsonable(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class SotaCondition:
     key: str
@@ -276,8 +286,8 @@ def main() -> None:
         manifest = {
             "protocol": "SOTA thermal/latency matrix; external detectors only; final-matrix style start conditioning",
             "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
-            "conditions": [asdict(condition) for condition in specs],
-            "schedule": [{"repeat": repeat, "order": order, **asdict(condition)} for repeat, order, condition in entries],
+            "conditions": [jsonable(asdict(condition)) for condition in specs],
+            "schedule": [jsonable({"repeat": repeat, "order": order, **asdict(condition)}) for repeat, order, condition in entries],
             "input_sha256": sha256(args.video),
             "model_sha256": {condition.key: sha256(condition.model) if condition.model.is_file() else "directory" for condition in specs},
             "system_before": system_snapshot(),
@@ -317,7 +327,7 @@ def main() -> None:
             "run_key": run_key,
             "repeat": repeat,
             "order_within_repeat": order,
-            "condition": asdict(condition),
+            "condition": jsonable(asdict(condition)),
             "command": command,
             "pre_child_temperature_c": pre_temperature,
             "started_utc": datetime.now(timezone.utc).isoformat(),

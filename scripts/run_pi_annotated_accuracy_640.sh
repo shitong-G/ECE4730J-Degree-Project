@@ -161,6 +161,22 @@ run_project_methods() {
     --apply-runtime-actions
 }
 
+run_sota_benchmarks() {
+  # shellcheck disable=SC1091
+  source "$VENV/bin/activate"
+  export PYTHONPATH="$ROOT/src:$ROOT/third_party/nanodet:$ROOT/third_party/PaddleDetection:${PYTHONPATH:-}"
+  export MPLCONFIGDIR="$ROOT/.plot_mplconfig"
+  export YOLO_CONFIG_DIR="$ROOT/Ultralytics"
+  python scripts/run_sota_thermal_matrix.py \
+    --video "$VIDEO" \
+    --max-frames "${SOTA_MAX_FRAMES:-600}" \
+    --repeats "${SOTA_REPEATS:-3}" \
+    --threads "$THREADS" \
+    --models "${SOTA_MODELS:-yolov8n_640,nanodet_plus_m_input640,picodet_l_640}" \
+    --output-dir experiments/sota_thermal_matrix \
+    --visualization-dir experiments/visualizations/sota_thermal_matrix
+}
+
 run_accuracy() {
   # shellcheck disable=SC1091
   source "$VENV/bin/activate"
@@ -198,6 +214,7 @@ case "$MODE" in
   setup) run_setup ;;
   download) run_download ;;
   run-project) run_project_methods ;;
+  run-sota) run_sota_benchmarks ;;
   accuracy) run_accuracy ;;
   picodet-probe) run_picodet_visual_probe ;;
   run-all)
@@ -207,7 +224,7 @@ case "$MODE" in
     run_accuracy
     ;;
   *)
-    echo "usage: $0 {setup|download|run-project|accuracy|picodet-probe|run-all}" >&2
+    echo "usage: $0 {setup|download|run-project|run-sota|accuracy|picodet-probe|run-all}" >&2
     exit 2
     ;;
 esac

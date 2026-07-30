@@ -261,7 +261,12 @@ def nanodet_no_pretrain_config(config_path: Path) -> Path:
         {},
     )
     backbone["pretrain"] = False
-    output = ROOT / "tmp" / "sota_baselines" / (config_path.stem + "_no_pretrain.yml")
+    input_size = getattr(nanodet_no_pretrain_config, "input_size", None)
+    suffix = ""
+    if input_size:
+        config.setdefault("data", {}).setdefault("val", {})["input_size"] = [int(input_size), int(input_size)]
+        suffix = f"_input{int(input_size)}"
+    output = ROOT / "tmp" / "sota_baselines" / (config_path.stem + suffix + "_no_pretrain.yml")
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, sort_keys=False)
@@ -272,7 +277,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--detector",
-        choices=["yolov8n", "pp_picodet_s_320", "nanodet_plus_m_320"],
+        choices=[
+            "yolov8n",
+            "pp_picodet_s_320",
+            "pp_picodet_l_640",
+            "nanodet_plus_m_320",
+            "nanodet_plus_m_input640",
+        ],
         required=True,
     )
     parser.add_argument("--video", type=Path, default=ROOT / "data" / "sample.mp4")
@@ -288,6 +299,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--save-video", action="store_true")
+    parser.add_argument("--nanodet-input-size", type=int, default=None)
     parser.add_argument(
         "--nanodet-config",
         type=Path,
@@ -302,13 +314,15 @@ def main() -> None:
     args.visualization_dir.mkdir(parents=True, exist_ok=True)
     if args.detector == "yolov8n":
         summary = run_ultralytics(args)
-    elif args.detector == "pp_picodet_s_320":
+    elif args.detector in {"pp_picodet_s_320", "pp_picodet_l_640"}:
         summary = run_subprocess_baseline(
             args,
             picodet_command(args),
             "paddle_inference_cpu",
         )
     else:
+        if args.nanodet_input_size:
+            setattr(nanodet_no_pretrain_config, "input_size", args.nanodet_input_size)
         summary = run_subprocess_baseline(
             args,
             nanodet_command(args),

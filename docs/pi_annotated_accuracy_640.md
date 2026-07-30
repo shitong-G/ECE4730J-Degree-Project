@@ -103,6 +103,38 @@ Run the three project methods on the annotated frame span:
 ./scripts/run_pi_annotated_accuracy_640.sh run-project
 ```
 
+Run only the SOTA baselines for non-accuracy system metrics:
+
+```bash
+./scripts/run_pi_annotated_accuracy_640.sh run-sota
+```
+
+This calls `scripts/run_sota_thermal_matrix.py`, following the same formal
+style as `scripts/run_final_thermal_matrix.py`: repeated runs, balanced order,
+start-temperature conditioning, per-run `temperature_trace.csv`, per-run
+`run_manifest.json`, and a suite-level `summary.csv`.
+
+Default SOTA conditions:
+
+- `yolov8n_640`
+- `nanodet_plus_m_input640`
+- `picodet_l_640`
+
+Useful controls:
+
+```bash
+SOTA_REPEATS=1 SOTA_MAX_FRAMES=600 ./scripts/run_pi_annotated_accuracy_640.sh run-sota
+SOTA_MODELS=yolov8n_640,nanodet_plus_m_input640 ./scripts/run_pi_annotated_accuracy_640.sh run-sota
+```
+
+Outputs:
+
+- `experiments/sota_thermal_matrix/<run-id>/summary.csv`
+- `experiments/sota_thermal_matrix/<run-id>/manifest.json`
+- `experiments/sota_thermal_matrix/<run-id>/r*/runtime.csv`
+- `experiments/sota_thermal_matrix/<run-id>/r*/temperature_trace.csv`
+- `experiments/sota_thermal_matrix/<run-id>/r*/run_manifest.json`
+
 Run YOLOv8n/NanoDet on the annotated PNG frames and evaluate all available
 `runtime_detections.jsonl` files:
 

@@ -13,6 +13,7 @@ VIDEO="${VIDEO:-data/sample3.mp4}"
 ANNOTATIONS="${ANNOTATIONS:-data/annotations/sample3_50frames_640}"
 MAX_FRAMES="${MAX_FRAMES:-214}"
 THREADS="${THREADS:-4}"
+INSTALL_TORCH="${INSTALL_TORCH:-cpu}"
 
 run_setup() {
   "$PY" -m venv "$VENV"
@@ -21,15 +22,80 @@ run_setup() {
   python -m pip install --upgrade pip
   python -m pip install \
     numpy==1.26.4 opencv-python-headless PyYAML onnxruntime \
-    ultralytics onnx onnxslim gdown \
-    torch torchvision omegaconf termcolor pycocotools pytorch-lightning==1.9.5 \
+    onnx onnxslim gdown \
+    omegaconf termcolor pycocotools pytorch-lightning==1.9.5 \
     torchmetrics pyaml imagesize tabulate "setuptools<81"
 
+  if [ "$INSTALL_TORCH" = "cpu" ]; then
+    python -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+  elif [ "$INSTALL_TORCH" = "apt" ]; then
+    echo "INSTALL_TORCH=apt selected; install torch outside the venv first:"
+    echo "  sudo apt update && sudo apt install -y python3-torch python3-torchvision"
+  elif [ "$INSTALL_TORCH" = "skip" ]; then
+    echo "Skipping torch/torchvision install. NanoDet and Ultralytics .pt export need torch."
+  else
+    echo "Unknown INSTALL_TORCH=$INSTALL_TORCH; use cpu, apt, or skip." >&2
+    exit 2
+  fi
+
+  # Install Ultralytics without dependency resolution so pip does not pull a
+  # CUDA torch stack on CPU-only Raspberry Pi systems.
+  python -m pip install --no-deps ultralytics ultralytics-thop
+
+  clone_or_download() {
+    local url="$1"
+    local branch="$2"
+    local target="$3"
+    local zip_url="$4"
+    if [ -d "$target" ]; then
+      return
+    fi
+    git -c http.version=HTTP/1.1 clone --depth 1 --branch "$branch" "$url" "$target" && return
+    echo "git clone failed for $target; falling back to codeload zip"
+    mkdir -p "$(dirname "$target")" tmp/downloads
+    local zip_path="tmp/downloads/$(basename "$target").zip"
+    python - <<PY
+from pathlib import Path
+import urllib.request
+url = "$zip_url"
+path = Path("$zip_path")
+path.parent.mkdir(parents=True, exist_ok=True)
+urllib.request.urlretrieve(url, path)
+PY
+    python - <<PY
+from pathlib import Path
+import shutil
+import zipfile
+zip_path = Path("$zip_path")
+target = Path("$target")
+tmp = Path("tmp/downloads/extract_$(basename "$target")")
+if tmp.exists():
+    shutil.rmtree(tmp)
+tmp.mkdir(parents=True)
+with zipfile.ZipFile(zip_path) as zf:
+    zf.extractall(tmp)
+roots = [p for p in tmp.iterdir() if p.is_dir()]
+if not roots:
+    raise SystemExit(f"no directory extracted from {zip_path}")
+if target.exists():
+    shutil.rmtree(target)
+shutil.move(str(roots[0]), str(target))
+PY
+  }
+
   if [ ! -d third_party/nanodet ]; then
-    git clone --depth 1 https://github.com/RangiLyu/nanodet.git third_party/nanodet
+    clone_or_download \
+      https://github.com/RangiLyu/nanodet.git \
+      main \
+      third_party/nanodet \
+      https://codeload.github.com/RangiLyu/nanodet/zip/refs/heads/main
   fi
   if [ ! -d third_party/PaddleDetection ]; then
-    git clone --depth 1 --branch release/2.7 https://github.com/PaddlePaddle/PaddleDetection.git third_party/PaddleDetection
+    clone_or_download \
+      https://github.com/PaddlePaddle/PaddleDetection.git \
+      release/2.7 \
+      third_party/PaddleDetection \
+      https://codeload.github.com/PaddlePaddle/PaddleDetection/zip/refs/heads/release/2.7
   fi
 }
 
@@ -37,7 +103,7 @@ run_download() {
   # shellcheck disable=SC1091
   source "$VENV/bin/activate"
   mkdir -p models/baselines
-  python scripts/prepare_sota_baseline_artifacts.py --models nanodet_plus_m_320 pp_picodet_l_640
+  python scripts/prepare_sota_baseline_artifacts.py --models nanodet_plus_m_320,pp_picodet_l_640
   python - <<'PY'
 from ultralytics import YOLO
 model = YOLO("yolov8n.pt")

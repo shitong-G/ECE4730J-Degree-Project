@@ -53,6 +53,38 @@ Setup Python dependencies and clone third-party repos:
 ./scripts/run_pi_annotated_accuracy_640.sh setup
 ```
 
+The Raspberry Pi is CPU-only. The setup script therefore installs Ultralytics
+with `--no-deps` and installs PyTorch from the CPU wheel index:
+
+```bash
+python -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+python -m pip install --no-deps ultralytics ultralytics-thop
+```
+
+If pip previously pulled CUDA packages such as `nvidia-cublas-*`,
+`nvidia-cudnn-*`, `nvidia-cuda-*`, or `triton`, remove them before rerunning:
+
+```bash
+source .venv/bin/activate
+python -m pip uninstall -y \
+  triton cuda-toolkit cuda-bindings cuda-pathfinder \
+  nvidia-cublas-cu13 nvidia-cuda-cupti-cu13 nvidia-cuda-nvrtc-cu13 \
+  nvidia-cuda-runtime-cu13 nvidia-cudnn-cu13 nvidia-cufft-cu13 \
+  nvidia-cufile-cu13 nvidia-curand-cu13 nvidia-cusolver-cu13 \
+  nvidia-cusparse-cu13 nvidia-cusparselt-cu13 nvidia-nccl-cu13 \
+  nvidia-nvjitlink-cu13 nvidia-nvshmem-cu13 nvidia-nvtx-cu13
+```
+
+If the CPU PyTorch wheel index does not provide a compatible wheel for your Pi
+OS/Python combination, use the OS package and tell the script not to install
+torch inside the venv:
+
+```bash
+sudo apt update
+sudo apt install -y python3-torch python3-torchvision
+INSTALL_TORCH=skip ./scripts/run_pi_annotated_accuracy_640.sh setup
+```
+
 Download/open-source weights:
 
 ```bash

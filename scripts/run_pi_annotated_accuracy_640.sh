@@ -16,7 +16,11 @@ THREADS="${THREADS:-4}"
 INSTALL_TORCH="${INSTALL_TORCH:-cpu}"
 
 run_setup() {
-  "$PY" -m venv "$VENV"
+  if [ "$INSTALL_TORCH" = "apt" ]; then
+    "$PY" -m venv --system-site-packages "$VENV"
+  else
+    "$PY" -m venv "$VENV"
+  fi
   # shellcheck disable=SC1091
   source "$VENV/bin/activate"
   python -m pip install --upgrade pip
@@ -31,6 +35,16 @@ run_setup() {
   elif [ "$INSTALL_TORCH" = "apt" ]; then
     echo "INSTALL_TORCH=apt selected; install torch outside the venv first:"
     echo "  sudo apt update && sudo apt install -y python3-torch python3-torchvision"
+    python - <<'PY'
+try:
+    import torch
+    print(f"using system torch: {torch.__version__}")
+except Exception as exc:
+    raise SystemExit(
+        "INSTALL_TORCH=apt requires apt-installed python3-torch visible inside "
+        f"the venv; import failed: {exc}"
+    )
+PY
   elif [ "$INSTALL_TORCH" = "skip" ]; then
     echo "Skipping torch/torchvision install. NanoDet and Ultralytics .pt export need torch."
   else

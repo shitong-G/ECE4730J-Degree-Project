@@ -135,9 +135,18 @@ def run_subprocess_baseline(
             break
     wall = time.perf_counter() - start
     if returncode != 0:
+        hint = ""
+        if returncode == -4 and args.detector.startswith("nanodet"):
+            hint = (
+                " Hint: exit code -4 is SIGILL on Linux. On Raspberry Pi this "
+                "usually means the venv's PyTorch wheel was built for an "
+                "unsupported ARM CPU instruction set. Prefer apt-installed "
+                "python3-torch in a --system-site-packages venv."
+            )
         raise RuntimeError(
             f"{args.detector} command failed with exit code {returncode}: "
             + " ".join(command)
+            + hint
         )
     frames_per_pass = args.max_frames or video_frame_count(args.video)
     frames = frames_per_pass * passes

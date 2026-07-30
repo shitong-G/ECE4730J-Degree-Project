@@ -242,6 +242,8 @@ import types
 
 import torch
 
+sys.path.insert(0, {str((ROOT / "third_party" / "nanodet").resolve())!r})
+
 m = types.ModuleType("torch._six")
 m.string_classes = (str, bytes)
 sys.modules["torch._six"] = m

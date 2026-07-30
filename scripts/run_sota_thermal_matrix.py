@@ -153,6 +153,12 @@ def validate_args(args: argparse.Namespace, specs: list[SotaCondition]) -> None:
         raise ValueError("--max-frames and --duration-min must be non-negative")
     if args.max_frames == 0 and args.duration_min == 0:
         raise ValueError("Set either --max-frames or --duration-min")
+    if args.cooldown_fan and not args.fan_preflight:
+        raise ValueError(
+            "--cooldown-fan requires --fan-preflight so GPIO/PWM problems are "
+            "caught before the first formal run. Use --no-cooldown-fan for "
+            "passive cooling, or run with sudo -E and leave fan preflight enabled."
+        )
     if args.start_temp_min_c <= 0 or args.start_temp_min_c > args.start_temp_max_c:
         raise ValueError("Start window must satisfy 0 < --start-temp-min-c <= --start-temp-max-c")
     missing = [str(path) for path in [args.config, args.video, *(spec.model for spec in specs)] if not path.exists()]

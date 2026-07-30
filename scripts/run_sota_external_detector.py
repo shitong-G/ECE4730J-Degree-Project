@@ -34,32 +34,42 @@ def run_ultralytics(args: argparse.Namespace) -> dict[str, object]:
     model = YOLO(str(args.model))
     rows: list[dict[str, float | int]] = []
     start = time.perf_counter()
-    for frame_id, result in enumerate(
-        model.predict(
+    deadline = start + args.duration_min * 60.0 if args.duration_min > 0 else None
+    frame_id = 0
+    pass_index = 0
+    while True:
+        pass_index += 1
+        for result in model.predict(
             source=str(args.video),
             imgsz=args.imgsz,
             device=args.device,
             stream=True,
-            save=args.save_video,
+            save=args.save_video and pass_index == 1,
             project=str(args.visualization_dir.parent),
             name=args.visualization_dir.name,
             verbose=False,
-        ),
-        start=1,
-    ):
-        if args.max_frames and frame_id > args.max_frames:
+        ):
+            if args.max_frames and frame_id >= args.max_frames:
+                break
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
+            frame_id += 1
+            speed = result.speed
+            detections = 0 if result.boxes is None else len(result.boxes)
+            rows.append(
+                {
+                    "frame": frame_id,
+                    "video_pass": pass_index,
+                    "preprocess_ms": float(speed.get("preprocess", 0.0)),
+                    "inference_ms": float(speed.get("inference", 0.0)),
+                    "postprocess_ms": float(speed.get("postprocess", 0.0)),
+                    "detection_count": int(detections),
+                }
+            )
+        if args.max_frames and frame_id >= args.max_frames:
             break
-        speed = result.speed
-        detections = 0 if result.boxes is None else len(result.boxes)
-        rows.append(
-            {
-                "frame": frame_id,
-                "preprocess_ms": float(speed.get("preprocess", 0.0)),
-                "inference_ms": float(speed.get("inference", 0.0)),
-                "postprocess_ms": float(speed.get("postprocess", 0.0)),
-                "detection_count": int(detections),
-            }
-        )
+        if deadline is None or time.perf_counter() >= deadline:
+            break
     wall = time.perf_counter() - start
     if not rows:
         raise RuntimeError("Ultralytics produced no frames")
@@ -112,20 +122,32 @@ def run_subprocess_baseline(
     Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
     Path(env["APPDATA"]).mkdir(parents=True, exist_ok=True)
     start = time.perf_counter()
-    completed = subprocess.run(command, cwd=ROOT, check=False, env=env)
+    deadline = start + args.duration_min * 60.0 if args.duration_min > 0 else None
+    passes = 0
+    returncode = 0
+    while True:
+        passes += 1
+        completed = subprocess.run(command, cwd=ROOT, check=False, env=env)
+        returncode = completed.returncode
+        if completed.returncode != 0:
+            break
+        if deadline is None or time.perf_counter() >= deadline:
+            break
     wall = time.perf_counter() - start
-    if completed.returncode != 0:
+    if returncode != 0:
         raise RuntimeError(
-            f"{args.detector} command failed with exit code {completed.returncode}: "
+            f"{args.detector} command failed with exit code {returncode}: "
             + " ".join(command)
         )
-    frames = args.max_frames or video_frame_count(args.video)
+    frames_per_pass = args.max_frames or video_frame_count(args.video)
+    frames = frames_per_pass * passes
     return {
         "detector": args.detector,
         "backend": backend,
         "model": str(args.model),
         "video": str(args.video),
         "frames": frames,
+        "video_passes": passes,
         "wall_sec": round(wall, 6),
         "throughput_fps": round(frames / wall, 6) if wall > 0 and frames else 0.0,
         "preprocess_ms_mean": "",
@@ -298,6 +320,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--max-frames", type=int, default=0)
+    parser.add_argument("--duration-min", type=float, default=0.0)
     parser.add_argument("--save-video", action="store_true")
     parser.add_argument("--nanodet-input-size", type=int, default=None)
     parser.add_argument(

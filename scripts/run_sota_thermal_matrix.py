@@ -87,6 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video", type=Path, default=ROOT / "data" / "sample3.mp4")
     parser.add_argument("--models", default="all", help="Comma-separated keys or all")
     parser.add_argument("--max-frames", type=int, default=600)
+    parser.add_argument("--duration-min", type=float, default=0.0)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "experiments" / "sota_thermal_matrix")
@@ -130,14 +131,17 @@ def plan_entries(specs: list[SotaCondition], repeats: int) -> list[tuple[int, in
 
 
 def expected_plan_minutes(args: argparse.Namespace, count: int) -> float:
-    # External baselines are frame-count limited, so use a conservative process
-    # allowance rather than a duration-min argument.
-    return count * (args.max_cooldown_min + args.startup_allowance_min + 10.0)
+    run_minutes = args.duration_min if args.duration_min > 0 else 10.0
+    return count * (args.max_cooldown_min + args.startup_allowance_min + run_minutes)
 
 
 def validate_args(args: argparse.Namespace, specs: list[SotaCondition]) -> None:
-    if args.repeats < 1 or args.max_frames < 1:
-        raise ValueError("--repeats and --max-frames must be positive")
+    if args.repeats < 1:
+        raise ValueError("--repeats must be positive")
+    if args.max_frames < 0 or args.duration_min < 0:
+        raise ValueError("--max-frames and --duration-min must be non-negative")
+    if args.max_frames == 0 and args.duration_min == 0:
+        raise ValueError("Set either --max-frames or --duration-min")
     if args.start_temp_min_c <= 0 or args.start_temp_min_c > args.start_temp_max_c:
         raise ValueError("Start window must satisfy 0 < --start-temp-min-c <= --start-temp-max-c")
     missing = [str(path) for path in [args.video, *(spec.model for spec in specs)] if not path.exists()]
@@ -174,6 +178,8 @@ def build_command(args: argparse.Namespace, condition: SotaCondition, output: Pa
         "--max-frames",
         str(args.max_frames),
     ]
+    if args.duration_min > 0:
+        command.extend(["--duration-min", str(args.duration_min)])
     if condition.nanodet_input_size is not None:
         command.extend(["--nanodet-input-size", str(condition.nanodet_input_size)])
     if args.save_video:

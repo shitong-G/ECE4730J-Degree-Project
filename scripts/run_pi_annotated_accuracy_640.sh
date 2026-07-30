@@ -169,7 +169,8 @@ run_sota_benchmarks() {
   export YOLO_CONFIG_DIR="$ROOT/Ultralytics"
   python scripts/run_sota_thermal_matrix.py \
     --video "$VIDEO" \
-    --max-frames "${SOTA_MAX_FRAMES:-600}" \
+    --max-frames "${SOTA_MAX_FRAMES:-0}" \
+    --duration-min "${SOTA_DURATION_MIN:-20}" \
     --repeats "${SOTA_REPEATS:-3}" \
     --threads "$THREADS" \
     --models "${SOTA_MODELS:-yolov8n_640,nanodet_plus_m_input640,picodet_l_640}" \

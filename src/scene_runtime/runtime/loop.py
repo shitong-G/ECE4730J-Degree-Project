@@ -507,8 +507,12 @@ class RuntimeLoop:
 
         self._current_action = action
         _ = runtime_state
+        t0 = time.perf_counter()
         applied_state = self._action_applier.apply(action)
+        action_apply_ms = self._elapsed_ms(t0)
+        t0 = time.perf_counter()
         fan_state = self._fan.update(device_state, action.mode)
+        fan_update_ms = self._elapsed_ms(t0)
 
         # Step 6 — inference or skip
         if self._scene_event_triggered_tracking and self._lk_tracker is not None:
@@ -529,6 +533,7 @@ class RuntimeLoop:
         infer_diagnostics: dict[str, float] = self._empty_infer_diagnostics()
 
         tracking_report = LKTrackingReport()
+        tracker_reset_ms = 0.0
         detector_call_type: str | None = None
         detector_call_resolution: int | None = None
 
@@ -550,7 +555,9 @@ class RuntimeLoop:
             self._metrics.record_latency(latency_ms)
             self._metrics.record_inference()
             self._last_detection_resolution = self._engine.last_resolved_input_resolution
+            t0 = time.perf_counter()
             tracking_report = self._reset_lk_tracker(frame)
+            tracker_reset_ms = self._elapsed_ms(t0)
             self._last_detector_frame = self._frame_id
             self._last_full_detector_frame = self._frame_id
         elif self._lk_tracker is not None:
@@ -626,11 +633,13 @@ class RuntimeLoop:
                         self._metrics.record_inference()
                         run_infer = True
                         self._last_detector_frame = self._frame_id
+                        t0 = time.perf_counter()
                         tracking_report = self._reset_lk_tracker(
                             frame,
                             reason=f"roi_refresh_{refresh_reason}",
                             input_resolution=self._last_detection_resolution,
                         )
+                        tracker_reset_ms += self._elapsed_ms(t0)
                         self._copy_roi_refresh_fields(
                             original_tracking_report,
                             tracking_report,
@@ -660,10 +669,12 @@ class RuntimeLoop:
                         self._last_detector_frame = self._frame_id
                         self._last_full_detector_frame = self._frame_id
                         self._last_detection_resolution = self._engine.last_resolved_input_resolution
+                        t0 = time.perf_counter()
                         tracking_report = self._reset_lk_tracker(
                             frame,
                             reason=f"forced_refresh_{refresh_reason}",
                         )
+                        tracker_reset_ms += self._elapsed_ms(t0)
                         self._copy_roi_refresh_fields(
                             original_tracking_report,
                             tracking_report,
@@ -726,6 +737,9 @@ class RuntimeLoop:
                 device_ms=device_ms,
                 runtime_state_ms=runtime_state_ms,
                 decision_ms=decision_ms,
+                action_apply_ms=action_apply_ms,
+                fan_update_ms=fan_update_ms,
+                tracker_reset_ms=tracker_reset_ms,
 
                 infer_outer_ms=infer_outer_ms,
                 preprocess_ms=float(infer_profile.get("preprocess_ms", 0.0)),

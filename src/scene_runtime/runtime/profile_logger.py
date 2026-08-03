@@ -31,6 +31,9 @@ PROFILE_COLUMNS = [
     "device_ms",
     "runtime_state_ms",
     "decision_ms",
+    "action_apply_ms",
+    "fan_update_ms",
+    "tracker_reset_ms",
 
     "infer_outer_ms",
     "preprocess_ms",
@@ -91,6 +94,9 @@ class ProfileRecord:
     device_ms: float
     runtime_state_ms: float
     decision_ms: float
+    action_apply_ms: float
+    fan_update_ms: float
+    tracker_reset_ms: float
 
     infer_outer_ms: float
     preprocess_ms: float

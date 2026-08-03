@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 import cv2
@@ -220,57 +219,29 @@ class SparseLKBoxTracker:
         if x2 - x1 < self.min_box_side or y2 - y1 < self.min_box_side:
             return None
 
-        per_cell = max(1, math.ceil(self.max_corners / max(1, self.grid_size * self.grid_size)))
-        x_edges = np.linspace(x1, x2 + 1, self.grid_size + 1, dtype=int)
-        y_edges = np.linspace(y1, y2 + 1, self.grid_size + 1, dtype=int)
-        collected: list[np.ndarray] = []
-
-        for row in range(self.grid_size):
-            for col in range(self.grid_size):
-                cell_x1 = int(x_edges[col])
-                cell_x2 = int(x_edges[col + 1])
-                cell_y1 = int(y_edges[row])
-                cell_y2 = int(y_edges[row + 1])
-                if cell_x2 - cell_x1 < self.min_box_side or cell_y2 - cell_y1 < self.min_box_side:
-                    continue
-                mask = np.zeros_like(gray, dtype=np.uint8)
-                cv2.rectangle(
-                    mask,
-                    (cell_x1, cell_y1),
-                    (cell_x2 - 1, cell_y2 - 1),
-                    255,
-                    thickness=-1,
-                )
-                points = cv2.goodFeaturesToTrack(
-                    gray,
-                    maxCorners=per_cell,
-                    qualityLevel=0.01,
-                    minDistance=4,
-                    mask=mask,
-                    blockSize=7,
-                    useHarrisDetector=False,
-                )
-                if points is not None:
-                    collected.append(points)
-
-        if collected:
-            points = np.concatenate(collected, axis=0).astype(np.float32)
-            unique_xy = np.unique(np.round(points.reshape(-1, 2), decimals=2), axis=0)
-            points = unique_xy.reshape(-1, 1, 2).astype(np.float32)
-            if len(points) >= self.min_valid_points:
-                return points[: self.max_corners]
-
         mask = np.zeros_like(gray, dtype=np.uint8)
         cv2.rectangle(mask, (x1, y1), (x2, y2), 255, thickness=-1)
-        return cv2.goodFeaturesToTrack(
+        # A previous implementation called goodFeaturesToTrack once for every
+        # grid cell.  With many detector outputs this made detector-frame
+        # latency grow roughly linearly with the number of boxes (and could
+        # consume several seconds on the Pi).  One masked call preserves the
+        # same spatial ROI while avoiding repeated full-image scans.  Request
+        # a larger candidate pool, then retain the strongest candidates.
+        candidate_limit = max(self.max_corners, self.max_corners * 2)
+        points = cv2.goodFeaturesToTrack(
             gray,
-            maxCorners=self.max_corners,
+            maxCorners=candidate_limit,
             qualityLevel=0.01,
             minDistance=5,
             mask=mask,
             blockSize=7,
             useHarrisDetector=False,
         )
+        if points is None:
+            return None
+        unique_xy = np.unique(np.round(points.reshape(-1, 2), decimals=2), axis=0)
+        points = unique_xy.reshape(-1, 1, 2).astype(np.float32)
+        return points[: self.max_corners]
 
     def _update_batch(
         self,

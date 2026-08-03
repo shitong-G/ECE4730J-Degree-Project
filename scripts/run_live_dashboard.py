@@ -240,6 +240,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--model-paths-by-resolution",
+        default=None,
+        help=(
+            "Override the resolution-to-ONNX mapping as "
+            "'320=path320.onnx,480=path480.onnx,640=path640.onnx'."
+        ),
+    )
+    parser.add_argument(
         "--camera",
         choices=["csi", "imx219-raw"],
         default=None,
@@ -347,10 +355,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-thread-sessions", action="store_true")
     parser.add_argument("--thread-session-counts", default=None)
     parser.add_argument("--apply-runtime-actions", action="store_true")
+    parser.add_argument(
+        "--fan-control",
+        choices=["config", "enabled", "disabled"],
+        default="config",
+        help="Use configured fan behavior, force fan on, or force it off.",
+    )
     parser.add_argument("--enable-lk-tracking", action="store_true")
     parser.add_argument("--lk-force-refresh-on-failure", action="store_true")
     parser.add_argument("--lk-max-failure-ratio", type=float, default=None)
     parser.add_argument("--lk-min-valid-points", type=int, default=None)
+    parser.add_argument(
+        "--query-budget-mode",
+        choices=["auto", "strict", "postprocess", "disabled"],
+        default=None,
+        help="Select dynamic ONNX query-budget handling; strict requires a dynamic model.",
+    )
+    parser.add_argument("--query-budget-override", type=int, default=None)
+    parser.add_argument("--query-budget-input-name", default=None)
+    parser.add_argument("--max-query-budget", type=int, default=None)
+    parser.add_argument(
+        "--temperature-query-budget",
+        action="store_true",
+        help="Select graph query budget from the raw CPU thermal state.",
+    )
+    parser.add_argument("--query-budget-normal", type=int, default=None)
+    parser.add_argument("--query-budget-warm", type=int, default=None)
+    parser.add_argument("--query-budget-hot", type=int, default=None)
+    parser.add_argument("--query-budget-critical", type=int, default=None)
+    parser.add_argument("--query-budget-hysteresis-c", type=float, default=None)
     parser.add_argument(
         "--no-stage-summary",
         action="store_true",
@@ -369,6 +402,8 @@ def main() -> None:
         raise ValueError("--repeat-runs must be at least 1")
 
     config = load_config(args.config, args.strategy)
+    if args.model is not None and args.model_paths_by_resolution is not None:
+        raise ValueError("--model and --model-paths-by-resolution are mutually exclusive")
     if args.model is not None:
         if not args.model.exists():
             raise FileNotFoundError(f"ONNX model does not exist: {args.model}")
@@ -377,6 +412,30 @@ def main() -> None:
         # raspberry_pi4.yaml maps 640 to the original FP32 model.  Leaving that
         # mapping in place would silently defeat --model for the common 640 case.
         inference_cfg.pop("model_paths_by_resolution", None)
+    if args.model_paths_by_resolution is not None:
+        model_map: dict[int, str] = {}
+        for item in args.model_paths_by_resolution.split(","):
+            resolution_text, separator, path_text = item.strip().partition("=")
+            if not separator or not resolution_text or not path_text:
+                raise ValueError(
+                    "--model-paths-by-resolution entries must be RESOLUTION=PATH"
+                )
+            resolution = int(resolution_text)
+            model_path = Path(path_text)
+            if resolution <= 0 or not model_path.exists():
+                raise FileNotFoundError(
+                    f"Invalid model mapping {item!r}; model must exist and resolution must be positive"
+                )
+            model_map[resolution] = str(model_path)
+        if not model_map:
+            raise ValueError("--model-paths-by-resolution cannot be empty")
+        inference_cfg = config.setdefault("inference", {})
+        inference_cfg["model_paths_by_resolution"] = model_map
+        default_resolution = int(config.get("runtime", {}).get("default_input_resolution", 640))
+        inference_cfg["model_path"] = model_map.get(
+            default_resolution,
+            model_map[max(model_map)],
+        )
     if args.thermal_state is not None:
         config.setdefault("thermal", {})["override_state"] = args.thermal_state
     if args.thermal_temp_c is not None:
@@ -389,6 +448,12 @@ def main() -> None:
         ]
     if args.apply_runtime_actions:
         config.setdefault("os_control", {})["apply_runtime_actions"] = True
+    fan_cfg = config.setdefault("fan", {})
+    if args.fan_control == "enabled":
+        fan_cfg["enabled"] = True
+        fan_cfg["enabled_strategies"] = ["*"]
+    elif args.fan_control == "disabled":
+        fan_cfg["enabled"] = False
     if args.enable_lk_tracking:
         config.setdefault("tracking", {})["enable_lk_tracking"] = True
     if args.lk_force_refresh_on_failure:
@@ -397,6 +462,36 @@ def main() -> None:
         config.setdefault("tracking", {})["lk_max_failure_ratio"] = args.lk_max_failure_ratio
     if args.lk_min_valid_points is not None:
         config.setdefault("tracking", {})["lk_min_valid_points"] = args.lk_min_valid_points
+    if args.query_budget_override is not None:
+        if args.query_budget_override < 1:
+            raise ValueError("--query-budget-override must be positive")
+        config.setdefault("runtime", {})["query_budget_override"] = args.query_budget_override
+    if args.max_query_budget is not None:
+        if args.max_query_budget < 1:
+            raise ValueError("--max-query-budget must be positive")
+        config.setdefault("inference", {})["max_query_budget"] = args.max_query_budget
+    if args.query_budget_mode is not None:
+        config.setdefault("inference", {})["query_budget_mode"] = args.query_budget_mode
+    if args.query_budget_input_name is not None:
+        config.setdefault("inference", {})["query_budget_input_name"] = args.query_budget_input_name
+    query_control = config.setdefault("query_budget_control", {})
+    if args.temperature_query_budget:
+        query_control["enabled"] = True
+    query_budget_overrides = {
+        "normal_budget": args.query_budget_normal,
+        "warm_budget": args.query_budget_warm,
+        "hot_budget": args.query_budget_hot,
+        "critical_budget": args.query_budget_critical,
+        "hysteresis_c": args.query_budget_hysteresis_c,
+    }
+    for key, value in query_budget_overrides.items():
+        if value is None:
+            continue
+        if key.endswith("_budget") and value < 1:
+            raise ValueError(f"--query-budget-{key[:-7]} must be positive")
+        if key == "hysteresis_c" and value < 0:
+            raise ValueError("--query-budget-hysteresis-c cannot be negative")
+        query_control[key] = value
 
     base_output = args.output
 
@@ -419,6 +514,14 @@ def main() -> None:
     print(f"  repeat:     {args.repeat_runs} run(s)")
     if args.model is not None:
         print(f"  model:      {args.model} (override; per-resolution mappings disabled)")
+    if args.model_paths_by_resolution is not None:
+        print(f"  model family: {args.model_paths_by_resolution}")
+    if args.query_budget_mode is not None:
+        print(f"  query budget: {args.query_budget_mode}")
+    if args.temperature_query_budget:
+        print("  query policy: temperature-adaptive")
+    if args.fan_control != "config":
+        print(f"  fan control: {args.fan_control}")
     if args.camera == "imx219-raw":
         interval = float(args.imx219_capture_interval_sec)
         capture_mode = (

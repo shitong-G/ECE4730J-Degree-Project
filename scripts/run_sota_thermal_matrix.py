@@ -83,6 +83,27 @@ def conditions(args: argparse.Namespace) -> list[SotaCondition]:
             args.picodet_l_640_dir,
             640,
         ),
+        SotaCondition(
+            "detr_640",
+            "DETR exported ONNX, input 640",
+            "detr_onnx",
+            args.detr_onnx_model,
+            640,
+        ),
+        SotaCondition(
+            "dq_detr_640",
+            "DQ-DETR exported ONNX, input 640",
+            "detr_onnx",
+            args.dq_detr_onnx_model,
+            640,
+        ),
+        SotaCondition(
+            "qr_detr_640",
+            "QR-DETR exported ONNX, input 640",
+            "detr_onnx",
+            args.qr_detr_onnx_model,
+            640,
+        ),
     ]
     if selected == {"all"}:
         return specs
@@ -96,7 +117,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT / "configs" / "raspberry_pi4.yaml")
     parser.add_argument("--video", type=Path, default=ROOT / "data" / "sample3.mp4")
-    parser.add_argument("--models", default="all", help="Comma-separated keys or all")
+    parser.add_argument(
+        "--models",
+        default="yolov8n_640,nanodet_plus_m_input640,picodet_l_640",
+        help="Comma-separated keys; use detr_640,dq_detr_640,qr_detr_640 for exported DETR variants",
+    )
     parser.add_argument("--max-frames", type=int, default=600)
     parser.add_argument("--duration-min", type=float, default=0.0)
     parser.add_argument("--repeats", type=int, default=3)
@@ -108,6 +133,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yolov8n-model", type=Path, default=ROOT / "models" / "baselines" / "yolov8n_640.onnx")
     parser.add_argument("--nanodet-checkpoint", type=Path, default=ROOT / "models" / "baselines" / "nanodet-plus-m_320.ckpt")
     parser.add_argument("--picodet-l-640-dir", type=Path, default=ROOT / "models" / "baselines" / "picodet_l_640_coco_lcnet_portable")
+    parser.add_argument("--detr-onnx-model", type=Path, default=ROOT / "models" / "baselines" / "detr_r50_640.onnx")
+    parser.add_argument("--dq-detr-onnx-model", type=Path, default=ROOT / "models" / "baselines" / "dq_detr_640.onnx")
+    parser.add_argument("--qr-detr-onnx-model", type=Path, default=ROOT / "models" / "baselines" / "qr_detr_640.onnx")
     parser.add_argument("--start-temp-min-c", type=float, default=45.0)
     parser.add_argument("--start-temp-max-c", type=float, default=50.0)
     parser.add_argument("--start-temp-reading-tolerance-c", type=float, default=0.5)
@@ -164,6 +192,23 @@ def validate_args(args: argparse.Namespace, specs: list[SotaCondition]) -> None:
     missing = [str(path) for path in [args.config, args.video, *(spec.model for spec in specs)] if not path.exists()]
     if missing:
         raise FileNotFoundError("Required input(s) not found: " + ", ".join(missing))
+    for spec in specs:
+        if spec.detector.startswith("pp_picodet"):
+            runner = ROOT / "third_party" / "PaddleDetection" / "deploy" / "python" / "infer.py"
+            if not runner.exists():
+                raise FileNotFoundError(
+                    "PicoDet requires PaddleDetection deploy runner. Missing: "
+                    f"{runner}. Run './scripts/run_pi_annotated_accuracy_640.sh setup' "
+                    "or clone PaddleDetection release/2.7 into third_party/PaddleDetection."
+                )
+        if spec.detector.startswith("nanodet"):
+            runner = ROOT / "third_party" / "nanodet" / "demo" / "demo.py"
+            if not runner.exists():
+                raise FileNotFoundError(
+                    "NanoDet requires the NanoDet repo. Missing: "
+                    f"{runner}. Run './scripts/run_pi_annotated_accuracy_640.sh setup' "
+                    "or clone NanoDet into third_party/nanodet."
+                )
     planned = expected_plan_minutes(args, len(specs) * args.repeats)
     if planned > args.max_total_hours * 60.0:
         raise ValueError(

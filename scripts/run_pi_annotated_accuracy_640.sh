@@ -27,8 +27,16 @@ run_setup() {
   python -m pip install \
     numpy==1.26.4 opencv-python-headless PyYAML onnxruntime \
     onnx onnxslim gdown \
-    omegaconf termcolor pycocotools pytorch-lightning==1.9.5 \
-    torchmetrics pyaml imagesize tabulate "setuptools<81"
+    omegaconf termcolor pycocotools pyaml imagesize tabulate six \
+    "setuptools<81"
+
+  if [ "$INSTALL_TORCH" = "apt" ]; then
+    # Do not let pip resolve Lightning's torch dependency into the venv.
+    # Raspberry Pi must use the distro ARM build of PyTorch in this mode.
+    python -m pip install --no-deps pytorch-lightning==1.9.5 torchmetrics
+  else
+    python -m pip install pytorch-lightning==1.9.5 torchmetrics
+  fi
 
   if [ "$INSTALL_TORCH" = "cpu" ]; then
     python -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
@@ -36,9 +44,19 @@ run_setup() {
     echo "INSTALL_TORCH=apt selected; install torch outside the venv first:"
     echo "  sudo apt update && sudo apt install -y python3-torch python3-torchvision"
     python - <<'PY'
+from pathlib import Path
+
 try:
     import torch
-    print(f"using system torch: {torch.__version__}")
+    torch_file = Path(torch.__file__).resolve()
+    print(f"using system torch: {torch.__version__} from {torch_file}")
+    if ".venv" in torch_file.parts:
+        raise SystemExit(
+            "INSTALL_TORCH=apt is selected, but torch is still imported from "
+            f"the virtualenv: {torch_file}. Run: deactivate; rm -rf .venv; "
+            "sudo apt install -y python3-torch python3-torchvision; "
+            "INSTALL_TORCH=apt ./scripts/run_pi_annotated_accuracy_640.sh setup"
+        )
 except Exception as exc:
     raise SystemExit(
         "INSTALL_TORCH=apt requires apt-installed python3-torch visible inside "

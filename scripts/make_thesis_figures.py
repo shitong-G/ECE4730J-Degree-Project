@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+from bisect import bisect_left, bisect_right
 from pathlib import Path
 from statistics import fmean, median
 from typing import Iterable
@@ -125,6 +126,30 @@ def elapsed(rows: list[dict[str, str]], column: str) -> tuple[list[float], list[
             xs.append((stamp - origin) / 60.0)
             ys.append(value)
     return xs, ys
+
+
+def centered_sliding_mean(
+    xs: list[float], ys: list[float], window_minutes: float
+) -> list[float]:
+    """Return a centered, time-based mean using a truncated window at the edges."""
+    if len(xs) != len(ys):
+        raise ValueError("Sliding-window coordinates must have equal lengths")
+    if window_minutes <= 0:
+        raise ValueError("Sliding-window duration must be positive")
+    if any(current < previous for previous, current in zip(xs, xs[1:])):
+        raise ValueError("Sliding-window timestamps must be non-decreasing")
+
+    half_window = window_minutes / 2.0
+    prefix = [0.0]
+    for value in ys:
+        prefix.append(prefix[-1] + value)
+
+    smoothed: list[float] = []
+    for timestamp in xs:
+        left = bisect_left(xs, timestamp - half_window)
+        right = bisect_right(xs, timestamp + half_window)
+        smoothed.append((prefix[right] - prefix[left]) / (right - left))
+    return smoothed
 
 
 def run_duration_minutes(rows: list[dict[str, str]]) -> float:
@@ -318,6 +343,206 @@ def make_thermal_trace_figure(
     save_figure(fig, output_dir / "thesis_supplementary_thermal_traces")
 
 
+def make_thermal_trace_sliding_window_figure(
+    runs: dict[str, list[dict[str, str]]],
+    output_dir: Path,
+    window_seconds: float = 60.0,
+) -> None:
+    """Overlay raw temperature observations with a centered sliding mean."""
+    window_minutes = window_seconds / 60.0
+    fig, ax = plt.subplots(figsize=(7.2, 3.05))
+    duration = max(run_duration_minutes(runs[key]) for key in RUN_ORDER)
+    source_rows: list[dict[str, str | float]] = []
+
+    for key, label, color in zip(RUN_ORDER, SHORT_LABELS, METHOD_COLORS):
+        xs, ys = elapsed(runs[key], "temp_c")
+        smoothed = centered_sliding_mean(xs, ys, window_minutes)
+        display_label = label.replace("\n", " ")
+        ax.plot(xs, ys, lw=0.70, alpha=0.22, color=color)
+        ax.plot(xs, smoothed, lw=1.65, color=color, label=display_label)
+        source_rows.extend(
+            {
+                "condition": display_label,
+                "elapsed_time_min": elapsed_min,
+                "temperature_c_raw": raw,
+                "temperature_c_sliding_mean": smooth,
+                "window_seconds": window_seconds,
+            }
+            for elapsed_min, raw, smooth in zip(xs, ys, smoothed)
+        )
+
+    for value, color in [
+        (58, COLORS["warm"]),
+        (66, COLORS["hot"]),
+        (76, COLORS["critical"]),
+    ]:
+        ax.axhline(value, color=color, lw=0.75, ls="--")
+    ax.set(
+        xlim=(0, duration),
+        xlabel="Elapsed time (min)",
+        ylabel="CPU temperature ($^\\circ$C)",
+    )
+    ax.grid(axis="y", color="#D9D9D9", lw=0.5)
+    ax.legend(ncol=3, loc="upper center")
+    stem = output_dir / "thesis_supplementary_thermal_traces_sliding_window"
+    save_figure(fig, stem)
+
+    with stem.with_name(stem.name + "_source.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "condition",
+                "elapsed_time_min",
+                "temperature_c_raw",
+                "temperature_c_sliding_mean",
+                "window_seconds",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(source_rows)
+
+
+def make_inference_latency_trace_figure(
+    runs: dict[str, list[dict[str, str]]], output_dir: Path
+) -> None:
+    """Plot detector-call latency at the time of each executed inference event."""
+    fig, ax = plt.subplots(figsize=(7.2, 3.05))
+    duration = max(run_duration_minutes(runs[key]) for key in RUN_ORDER)
+    source_rows: list[dict[str, str | float | int]] = []
+
+    for key, label, color in zip(RUN_ORDER, SHORT_LABELS, METHOD_COLORS):
+        rows = runs[key]
+        origin = number(rows[0].get("timestamp")) or 0.0
+        xs: list[float] = []
+        ys: list[float] = []
+        for row in rows:
+            if not truth(row.get("did_infer")):
+                continue
+            stamp = number(row.get("timestamp"))
+            latency = number(row.get("latency_ms"))
+            if stamp is None or latency is None:
+                continue
+            elapsed_min = (stamp - origin) / 60.0
+            xs.append(elapsed_min)
+            ys.append(latency)
+            source_rows.append(
+                {
+                    "condition": label.replace("\n", " "),
+                    "elapsed_time_min": elapsed_min,
+                    "inference_latency_ms": latency,
+                    "detector_call_type": row.get("detector_call_type", ""),
+                    "frame_id": row.get("frame_id", ""),
+                }
+            )
+        ax.plot(
+            xs,
+            ys,
+            lw=1.05,
+            color=color,
+            label=label.replace("\n", " "),
+        )
+
+    ax.set(
+        xlim=(0, duration),
+        xlabel="Elapsed time (min)",
+        ylabel="Detector-call latency (ms)",
+    )
+    ax.grid(axis="y", color="#D9D9D9", lw=0.5)
+    ax.legend(ncol=3, loc="upper center")
+    save_figure(fig, output_dir / "thesis_supplementary_inference_latency_traces")
+
+    source_path = output_dir / "thesis_supplementary_inference_latency_traces_source.csv"
+    with source_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "condition",
+                "elapsed_time_min",
+                "inference_latency_ms",
+                "detector_call_type",
+                "frame_id",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(source_rows)
+
+
+def make_inference_latency_trace_sliding_window_figure(
+    runs: dict[str, list[dict[str, str]]],
+    output_dir: Path,
+    window_seconds: float = 60.0,
+) -> None:
+    """Overlay raw detector-call latency with a centered sliding mean."""
+    window_minutes = window_seconds / 60.0
+    fig, ax = plt.subplots(figsize=(7.2, 3.05))
+    duration = max(run_duration_minutes(runs[key]) for key in RUN_ORDER)
+    source_rows: list[dict[str, str | float | int]] = []
+
+    for key, label, color in zip(RUN_ORDER, SHORT_LABELS, METHOD_COLORS):
+        rows = runs[key]
+        origin = number(rows[0].get("timestamp")) or 0.0
+        xs: list[float] = []
+        ys: list[float] = []
+        call_rows: list[dict[str, str]] = []
+        for row in rows:
+            if not truth(row.get("did_infer")):
+                continue
+            stamp = number(row.get("timestamp"))
+            latency = number(row.get("latency_ms"))
+            if stamp is None or latency is None:
+                continue
+            xs.append((stamp - origin) / 60.0)
+            ys.append(latency)
+            call_rows.append(row)
+
+        smoothed = centered_sliding_mean(xs, ys, window_minutes)
+        display_label = label.replace("\n", " ")
+        ax.plot(xs, ys, lw=0.70, alpha=0.22, color=color)
+        ax.plot(xs, smoothed, lw=1.65, color=color, label=display_label)
+        source_rows.extend(
+            {
+                "condition": display_label,
+                "elapsed_time_min": elapsed_min,
+                "inference_latency_ms_raw": raw,
+                "inference_latency_ms_sliding_mean": smooth,
+                "window_seconds": window_seconds,
+                "detector_call_type": row.get("detector_call_type", ""),
+                "frame_id": row.get("frame_id", ""),
+            }
+            for elapsed_min, raw, smooth, row in zip(xs, ys, smoothed, call_rows)
+        )
+
+    ax.set(
+        xlim=(0, duration),
+        xlabel="Elapsed time (min)",
+        ylabel="Detector-call latency (ms)",
+    )
+    ax.grid(axis="y", color="#D9D9D9", lw=0.5)
+    ax.legend(ncol=3, loc="upper center")
+    stem = output_dir / "thesis_supplementary_inference_latency_traces_sliding_window"
+    save_figure(fig, stem)
+
+    with stem.with_name(stem.name + "_source.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "condition",
+                "elapsed_time_min",
+                "inference_latency_ms_raw",
+                "inference_latency_ms_sliding_mean",
+                "window_seconds",
+                "detector_call_type",
+                "frame_id",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(source_rows)
+
+
 def make_controller_coverage_figure(
     formal_rows: list[dict[str, str]],
     output_dir: Path,
@@ -357,6 +582,9 @@ def main() -> None:
     make_runtime_figure(runs, args.output_dir)
     make_quality_figure(args.manual_metrics, args.output_dir)
     make_thermal_trace_figure(runs, args.output_dir)
+    make_thermal_trace_sliding_window_figure(runs, args.output_dir)
+    make_inference_latency_trace_figure(runs, args.output_dir)
+    make_inference_latency_trace_sliding_window_figure(runs, args.output_dir)
     if args.activation_dir is not None:
         make_controller_coverage_figure(
             runs["r01_06_proposed_software"],

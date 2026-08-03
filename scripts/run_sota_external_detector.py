@@ -99,6 +99,118 @@ def run_ultralytics(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def _softmax(values):
+    import numpy as np
+
+    shifted = values - np.max(values, axis=-1, keepdims=True)
+    exp = np.exp(shifted)
+    return exp / np.sum(exp, axis=-1, keepdims=True)
+
+
+def run_detr_onnx(args: argparse.Namespace) -> dict[str, object]:
+    """Benchmark exported DETR-family models with the common HF-style output.
+
+    The adapter expects one input image tensor [1,3,H,W] and outputs containing
+    logits [1,Q,C] plus boxes [1,Q,4]. It is deliberately model-agnostic so
+    DETR/DQ-DETR/QR-DETR exports can share the Pi benchmark protocol.
+    """
+    import cv2
+    import numpy as np
+    import onnxruntime as ort
+
+    providers = ["CPUExecutionProvider"]
+    session_options = ort.SessionOptions()
+    session_options.intra_op_num_threads = max(1, int(args.threads))
+    session_options.inter_op_num_threads = 1
+    session = ort.InferenceSession(str(args.model), providers=providers,
+                                   sess_options=session_options)
+    session.set_providers(providers)
+    input_meta = session.get_inputs()[0]
+    input_name = input_meta.name
+    shape = input_meta.shape
+    height = args.imgsz if not isinstance(shape[-2], int) else int(shape[-2])
+    width = args.imgsz if not isinstance(shape[-1], int) else int(shape[-1])
+
+    cap = cv2.VideoCapture(str(args.video))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {args.video}")
+    rows: list[dict[str, float | int]] = []
+    start = time.perf_counter()
+    deadline = start + args.duration_min * 60.0 if args.duration_min > 0 else None
+    frame_id = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, frame = cap.read()
+            if not ok:
+                break
+        if args.max_frames and frame_id >= args.max_frames:
+            break
+        if deadline is not None and time.perf_counter() >= deadline:
+            break
+        frame_id += 1
+        prep_start = time.perf_counter()
+        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        image = cv2.resize(image, (width, height), interpolation=cv2.INTER_LINEAR)
+        tensor = image.astype(np.float32) / 255.0
+        tensor = np.transpose(tensor, (2, 0, 1))[None, ...]
+        preprocess_ms = (time.perf_counter() - prep_start) * 1000.0
+        infer_start = time.perf_counter()
+        outputs = session.run(None, {input_name: tensor})
+        inference_ms = (time.perf_counter() - infer_start) * 1000.0
+        post_start = time.perf_counter()
+        logits = next((item for item in outputs if getattr(item, "ndim", 0) == 3
+                       and item.shape[-1] > 4), None)
+        boxes = next((item for item in outputs if getattr(item, "ndim", 0) == 3
+                      and item.shape[-1] == 4), None)
+        detections = 0
+        if logits is not None and boxes is not None:
+            probabilities = _softmax(logits[0])
+            if probabilities.shape[-1] > 1:
+                probabilities = probabilities[:, :-1]
+            confidence = np.max(probabilities, axis=-1)
+            detections = int(np.count_nonzero(confidence >= args.confidence))
+        postprocess_ms = (time.perf_counter() - post_start) * 1000.0
+        rows.append({
+            "frame": frame_id,
+            "preprocess_ms": preprocess_ms,
+            "inference_ms": inference_ms,
+            "postprocess_ms": postprocess_ms,
+            "detection_count": detections,
+        })
+    cap.release()
+    wall = time.perf_counter() - start
+    if not rows:
+        raise RuntimeError("DETR ONNX produced no frames")
+    frame_csv = args.output_csv.with_name(args.output_csv.stem + "_frames.csv")
+    with frame_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    def mean(key: str) -> float:
+        return sum(float(row[key]) for row in rows) / len(rows)
+
+    return {
+        "detector": args.detector,
+        "backend": "onnxruntime_cpu_detr_adapter",
+        "model": str(args.model),
+        "video": str(args.video),
+        "frames": len(rows),
+        "wall_sec": round(wall, 6),
+        "throughput_fps": round(len(rows) / wall, 6) if wall > 0 else 0.0,
+        "preprocess_ms_mean": round(mean("preprocess_ms"), 6),
+        "inference_ms_mean": round(mean("inference_ms"), 6),
+        "postprocess_ms_mean": round(mean("postprocess_ms"), 6),
+        "detection_count_mean": round(mean("detection_count"), 6),
+        "frame_csv": str(frame_csv),
+        "confidence_threshold": args.confidence,
+        "input_width": width,
+        "input_height": height,
+    }
+
+
 def run_subprocess_baseline(
     args: argparse.Namespace,
     command: list[str],
@@ -316,6 +428,7 @@ def parse_args() -> argparse.Namespace:
             "pp_picodet_l_640",
             "nanodet_plus_m_320",
             "nanodet_plus_m_input640",
+            "detr_onnx",
         ],
         required=True,
     )
@@ -334,6 +447,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration-min", type=float, default=0.0)
     parser.add_argument("--save-video", action="store_true")
     parser.add_argument("--nanodet-input-size", type=int, default=None)
+    parser.add_argument("--confidence", type=float, default=0.5,
+                        help="Confidence threshold for generic DETR ONNX decoding")
     parser.add_argument(
         "--nanodet-config",
         type=Path,
@@ -348,6 +463,8 @@ def main() -> None:
     args.visualization_dir.mkdir(parents=True, exist_ok=True)
     if args.detector == "yolov8n":
         summary = run_ultralytics(args)
+    elif args.detector == "detr_onnx":
+        summary = run_detr_onnx(args)
     elif args.detector in {"pp_picodet_s_320", "pp_picodet_l_640"}:
         summary = run_subprocess_baseline(
             args,

@@ -157,6 +157,9 @@ class RuntimeLoop:
         self._lk_force_refresh = bool(
             tracking_cfg.get("lk_force_refresh_on_failure", False)
         )
+        self._lk_slow_update_threshold_ms = max(
+            0.0, float(tracking_cfg.get("lk_slow_update_threshold_ms", 5000.0))
+        )
         self._scene_event_triggered_tracking = bool(
             tracking_cfg.get("scene_event_triggered", False)
         )
@@ -276,6 +279,9 @@ class RuntimeLoop:
                 ),
                 large_track_refresh_area_ratio=float(
                     tracking_cfg.get("lk_large_track_refresh_area_ratio", 0.08)
+                ),
+                opencv_num_threads=int(
+                    tracking_cfg.get("lk_opencv_num_threads", 1)
                 ),
             )
             if self._lk_tracking_enabled
@@ -565,6 +571,18 @@ class RuntimeLoop:
             t0 = time.perf_counter()
             tracked_detections, tracking_report = self._lk_tracker.update(frame)
             tracking_report.tracking_ms = self._elapsed_ms(t0)
+            if (
+                self._lk_slow_update_threshold_ms > 0.0
+                and tracking_report.tracking_ms >= self._lk_slow_update_threshold_ms
+            ):
+                # A very slow LK update is a runtime fault even when the
+                # optical-flow quality checks pass.  Force a detector refresh
+                # so a stalled/stale tracker cannot remain in service for the
+                # following frames.  The detector-refresh path also records
+                # the event explicitly in ``tracking_reason``.
+                previous_reason = tracking_report.reason
+                tracking_report.reason = f"lk_update_slow_{previous_reason}"
+                tracking_report.should_refresh = True
             self._last_detections = tracked_detections
             if self._scene_event_triggered_tracking:
                 self._apply_event_refresh_gate(

@@ -51,6 +51,8 @@ tracking:
   lk_win_size: 15
   lk_max_level: 2
   lk_max_iterations: 15
+  lk_opencv_num_threads: 1
+  lk_slow_update_threshold_ms: 5000
   lk_grid_size: 3
   lk_robust_mad_multiplier: 2.5
   lk_redetect_interval: 5

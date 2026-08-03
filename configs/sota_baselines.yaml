@@ -1,0 +1,98 @@
+# Lightweight detector baselines for same-video comparison.
+#
+# The target output is ONNX where practical so Windows/local CPU and Raspberry
+# Pi CPU runs can use the same artifact family. PicoDet also keeps Paddle
+# inference and Paddle Lite as first-class fallbacks because that is its native
+# deployment path.
+
+video: data/sample.mp4
+output_root: experiments/logs/sota_baselines
+visualization_root: experiments/visualizations/sota_baselines
+default_threads: 4
+max_frames: 600
+
+baselines:
+  yolov8n:
+    display_name: YOLOv8n
+    family: ultralytics-yolo
+    recommended_input_size: 640
+    source_repo: https://github.com/ultralytics/ultralytics
+    docs:
+      model: https://docs.ultralytics.com/models/yolov8/
+      export: https://docs.ultralytics.com/modes/export/
+    license_note: AGPL-3.0 for Ultralytics package; check project usage constraints.
+    pretrained:
+      format: pt
+      file: yolov8n.pt
+      origin: Ultralytics auto-download by model name.
+    artifacts:
+      torch: models/baselines/yolov8n.pt
+      onnx: models/baselines/yolov8n_640.onnx
+    local_backend:
+      preferred: ultralytics
+      alternate: onnxruntime
+    raspberry_pi_backend:
+      preferred: onnxruntime
+      alternate: ncnn export from Ultralytics if ONNX Runtime is slower.
+    export_commands:
+      - python -m pip install ultralytics onnx onnxslim
+      - yolo export model=yolov8n.pt format=onnx imgsz=640 opset=12 simplify=True
+
+  pp_picodet_s_320:
+    display_name: PP-PicoDet-S 320
+    family: paddle-picodet
+    recommended_input_size: 320
+    source_repo: https://github.com/PaddlePaddle/PaddleDetection
+    docs:
+      model: https://github.com/PaddlePaddle/PaddleDetection/tree/release/2.7/configs/picodet
+      export: https://github.com/PaddlePaddle/PaddleDetection/blob/release/2.7/deploy/EXPORT_MODEL.md
+      onnx: https://github.com/PaddlePaddle/Paddle2ONNX
+    license_note: Apache-2.0 for PaddleDetection.
+    pretrained:
+      format: pdparams
+      config: third_party/PaddleDetection/configs/picodet/picodet_s_320_coco_lcnet.yml
+      origin: PaddleDetection model zoo download URL in the PicoDet config docs.
+    artifacts:
+      paddle_inference_dir: models/baselines/picodet_s_320_coco_lcnet_portable
+      paddle_inference_tar: models/baselines/picodet_s_320_coco_lcnet.tar
+      onnx: models/baselines/picodet_s_320.onnx
+    local_backend:
+      preferred: paddle_inference
+      alternate: onnxruntime after paddle2onnx conversion.
+    raspberry_pi_backend:
+      preferred: paddle_lite
+      alternate: onnxruntime if converted graph is supported.
+    export_commands:
+      - python scripts/prepare_sota_baseline_artifacts.py --models pp_picodet_s_320
+      - git clone --depth 1 --branch release/2.7 https://github.com/PaddlePaddle/PaddleDetection.git third_party/PaddleDetection
+      - python third_party/PaddleDetection/tools/export_model.py -c third_party/PaddleDetection/configs/picodet/picodet_s_320_coco_lcnet.yml --output_dir models/baselines -o weights=https://paddledet.bj.bcebos.com/models/picodet_s_320_coco_lcnet.pdparams
+      - paddle2onnx --model_dir models/baselines/picodet_s_320_coco_lcnet_portable --model_filename model.pdmodel --params_filename model.pdiparams --save_file models/baselines/picodet_s_320.onnx --opset_version 12
+
+  nanodet_plus_m_320:
+    display_name: NanoDet-Plus-m 320
+    family: nanodet-plus
+    recommended_input_size: 320
+    source_repo: https://github.com/RangiLyu/nanodet
+    docs:
+      model: https://github.com/RangiLyu/nanodet
+      export: https://github.com/RangiLyu/nanodet/blob/main/tools/export_onnx.py
+    license_note: Apache-2.0 for NanoDet.
+    pretrained:
+      format: ckpt
+      config: third_party/nanodet/config/nanodet-plus-m_320.yml
+      origin: NanoDet official model-zoo Google Drive checkpoint link.
+      google_drive_checkpoint_id: 1YvuEhahlgqxIhJu7bsL-fhaqubKcCWQc
+    artifacts:
+      torch: models/baselines/nanodet-plus-m_320.ckpt
+      onnx: models/baselines/nanodet_plus_m_320.onnx
+      fastdeploy_onnx: models/baselines/nanodet_plus_m_320_fastdeploy.onnx
+    local_backend:
+      preferred: onnxruntime
+      alternate: NanoDet PyTorch demo for correctness checks.
+    raspberry_pi_backend:
+      preferred: ncnn
+      alternate: onnxruntime.
+    export_commands:
+      - python scripts/prepare_sota_baseline_artifacts.py --models nanodet_plus_m_320
+      - git clone --depth 1 https://github.com/RangiLyu/nanodet.git third_party/nanodet
+      - python third_party/nanodet/tools/export_onnx.py --cfg_path third_party/nanodet/config/nanodet-plus-m_320.yml --model_path models/baselines/nanodet-plus-m_320.ckpt --out_path models/baselines/nanodet_plus_m_320.onnx

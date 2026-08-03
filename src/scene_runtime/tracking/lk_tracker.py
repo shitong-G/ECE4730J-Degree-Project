@@ -75,6 +75,7 @@ class SparseLKBoxTracker:
         exit_refresh_min_area_ratio: float = 0.01,
         large_track_refresh_frames: int = 30,
         large_track_refresh_area_ratio: float = 0.08,
+        opencv_num_threads: int = 1,
     ) -> None:
         self.max_corners = int(max_corners)
         self.min_valid_points = int(min_valid_points)
@@ -96,6 +97,15 @@ class SparseLKBoxTracker:
         self.exit_refresh_min_area_ratio = float(exit_refresh_min_area_ratio)
         self.large_track_refresh_frames = int(large_track_refresh_frames)
         self.large_track_refresh_area_ratio = float(large_track_refresh_area_ratio)
+        self.opencv_num_threads = max(0, int(opencv_num_threads))
+        if self.opencv_num_threads > 0:
+            # LK is a small, latency-sensitive workload.  Letting OpenCV
+            # create its own worker pool on the same CPU as ONNX Runtime can
+            # cause long scheduler stalls on the target ARM system.  A single
+            # OpenCV worker keeps the critical section bounded and avoids
+            # nested thread-pool contention.  The setting is process-global in
+            # OpenCV, so it is applied once when the tracker is constructed.
+            cv2.setNumThreads(self.opencv_num_threads)
         self._previous_gray: np.ndarray | None = None
         self._tracks: list[_Track] = []
         self._last_input_resolution: int | None = None

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import subprocess
 import sys
@@ -13,6 +14,46 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from scene_runtime.device.arm_clock import read_arm_clock_mhz
+from scene_runtime.device.frequency import read_cpu_frequencies_mhz
+from scene_runtime.device.temperature import read_temperature_c
+from scene_runtime.device.throttling import read_throttling_state
+from scene_runtime.device.power import read_power_w
+from run_controlled_experiment_suite import read_governors, system_snapshot
+
+
+class HardwareSampler:
+    """Cache expensive firmware reads while sampling temperature per frame."""
+
+    def __init__(self, interval_sec: float) -> None:
+        self.interval_sec = max(0.0, interval_sec)
+        self.last_sample = 0.0
+        self.cached: dict[str, object] = {}
+
+    def read(self) -> dict[str, object]:
+        now = time.monotonic()
+        temp = read_temperature_c()
+        if not self.cached or now - self.last_sample >= self.interval_sec:
+            frequencies = read_cpu_frequencies_mhz()
+            throttling = read_throttling_state()
+            self.cached = {
+                "arm_clock_mhz": read_arm_clock_mhz(),
+                "freq_mhz_avg": frequencies.get("avg_mhz"),
+                "freq_mhz": {key: value for key, value in frequencies.items() if key != "avg_mhz"},
+                "throttling_raw": throttling.get("raw"),
+                "under_voltage": throttling.get("under_voltage"),
+                "arm_freq_capped": throttling.get("arm_freq_capped"),
+                "currently_throttled": throttling.get("currently_throttled"),
+                "under_voltage_occurred": throttling.get("under_voltage_occurred"),
+                "arm_freq_capped_occurred": throttling.get("arm_freq_capped_occurred"),
+                "throttled_occurred": throttling.get("throttled_occurred"),
+                "power_w": read_power_w(),
+                "governor": next(iter(read_governors().values()), None),
+            }
+            self.last_sample = now
+        return {"temp_c": temp, **self.cached}
 
 
 def csv_path_for(output_dir: Path, detector: str) -> Path:
@@ -33,6 +74,12 @@ def run_ultralytics(args: argparse.Namespace) -> dict[str, object]:
 
     model = YOLO(str(args.model))
     rows: list[dict[str, float | int]] = []
+    hardware = HardwareSampler(args.hardware_sample_sec)
+    system_before = system_snapshot()
+    hardware_trace = args.output_csv.with_name(args.output_csv.stem + "_hardware.csv")
+    hardware_trace.parent.mkdir(parents=True, exist_ok=True)
+    hardware_handle = hardware_trace.open("w", newline="", encoding="utf-8")
+    hardware_writer = None
     start = time.perf_counter()
     deadline = start + args.duration_min * 60.0 if args.duration_min > 0 else None
     frame_id = 0
@@ -56,21 +103,40 @@ def run_ultralytics(args: argparse.Namespace) -> dict[str, object]:
             frame_id += 1
             speed = result.speed
             detections = 0 if result.boxes is None else len(result.boxes)
-            rows.append(
-                {
+            sample = hardware.read()
+            row = {
                     "frame": frame_id,
                     "video_pass": pass_index,
+                    "elapsed_sec": time.perf_counter() - start,
                     "preprocess_ms": float(speed.get("preprocess", 0.0)),
                     "inference_ms": float(speed.get("inference", 0.0)),
                     "postprocess_ms": float(speed.get("postprocess", 0.0)),
                     "detection_count": int(detections),
+                    "temperature_c": sample.get("temp_c"),
+                    "freq_mhz_avg": sample.get("freq_mhz_avg"),
+                    "arm_clock_mhz": sample.get("arm_clock_mhz"),
+                    "power_w": sample.get("power_w"),
+                    "governor": sample.get("governor"),
+                    "throttling_raw": sample.get("throttling_raw"),
+                    "under_voltage": sample.get("under_voltage"),
+                    "arm_freq_capped": sample.get("arm_freq_capped"),
+                    "currently_throttled": sample.get("currently_throttled"),
+                    "under_voltage_occurred": sample.get("under_voltage_occurred"),
+                    "arm_freq_capped_occurred": sample.get("arm_freq_capped_occurred"),
+                    "throttled_occurred": sample.get("throttled_occurred"),
                 }
-            )
+            rows.append(row)
+            if hardware_writer is None:
+                hardware_writer = csv.DictWriter(hardware_handle, fieldnames=list(row))
+                hardware_writer.writeheader()
+            hardware_writer.writerow(row)
+            hardware_handle.flush()
         if args.max_frames and frame_id >= args.max_frames:
             break
         if deadline is None or time.perf_counter() >= deadline:
             break
     wall = time.perf_counter() - start
+    hardware_handle.close()
     if not rows:
         raise RuntimeError("Ultralytics produced no frames")
 
@@ -81,7 +147,8 @@ def run_ultralytics(args: argparse.Namespace) -> dict[str, object]:
         writer.writerows(rows)
 
     def mean(key: str) -> float:
-        return sum(float(row[key]) for row in rows) / len(rows)
+        values = [float(row[key]) for row in rows if row.get(key) is not None and row.get(key) != ""]
+        return sum(values) / len(values) if values else 0.0
 
     return {
         "detector": args.detector,
@@ -96,6 +163,18 @@ def run_ultralytics(args: argparse.Namespace) -> dict[str, object]:
         "postprocess_ms_mean": round(mean("postprocess_ms"), 6),
         "detection_count_mean": round(mean("detection_count"), 6),
         "frame_csv": str(frame_csv),
+        "hardware_trace_csv": str(hardware_trace),
+        "temperature_c_mean": round(mean("temperature_c"), 6),
+        "temperature_c_min": round(min(float(row["temperature_c"]) for row in rows if row["temperature_c"] is not None), 6) if any(row["temperature_c"] is not None for row in rows) else "",
+        "temperature_c_max": round(max(float(row["temperature_c"]) for row in rows if row["temperature_c"] is not None), 6) if any(row["temperature_c"] is not None for row in rows) else "",
+        "freq_mhz_avg_mean": round(mean("freq_mhz_avg"), 6),
+        "arm_clock_mhz_mean": round(mean("arm_clock_mhz"), 6),
+        "arm_clock_mhz_min": round(min(float(row["arm_clock_mhz"]) for row in rows if row["arm_clock_mhz"] is not None), 6) if any(row["arm_clock_mhz"] is not None for row in rows) else "",
+        "arm_clock_mhz_max": round(max(float(row["arm_clock_mhz"]) for row in rows if row["arm_clock_mhz"] is not None), 6) if any(row["arm_clock_mhz"] is not None for row in rows) else "",
+        "under_voltage_observed": any(row["under_voltage"] is True for row in rows),
+        "throttled_observed": any(row["currently_throttled"] is True for row in rows),
+        "system_before": json.dumps(system_before, ensure_ascii=False, sort_keys=True),
+        "system_after": json.dumps(system_snapshot(), ensure_ascii=False, sort_keys=True),
     }
 
 
@@ -443,6 +522,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument(
+        "--hardware-sample-sec",
+        type=float,
+        default=1.0,
+        help="Hardware/firmware sampling interval; temperature remains sampled per frame",
+    )
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--duration-min", type=float, default=0.0)
     parser.add_argument("--save-video", action="store_true")
